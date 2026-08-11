@@ -250,10 +250,12 @@ object WebViewManager {
                         if (scheme == "intent") {
                             try {
                                 val parsed = Intent.parseUri(uri.toString(), Intent.URI_INTENT_SCHEME)
-                                    .addCategory(Intent.CATEGORY_BROWSABLE)
-                                    .setComponent(null)
-                                    .setSelector(null)
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                // Note: setSelector() returns void (the others return Intent),
+                                // so build the intent statement-by-statement instead of chaining.
+                                parsed.addCategory(Intent.CATEGORY_BROWSABLE)
+                                parsed.setComponent(null)
+                                parsed.setSelector(null)
+                                parsed.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                 if (ctx != null && parsed.resolveActivity(ctx.packageManager) != null) {
                                     ctx.startActivity(parsed)
                                 } else {
