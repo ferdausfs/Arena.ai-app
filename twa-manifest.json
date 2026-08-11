@@ -1,0 +1,33 @@
+{
+  "packageId": "com.federal.arenaai",
+  "host": "arena.ai",
+  "name": "Arena AI",
+  "launcherName": "Arena AI",
+  "display": "standalone",
+  "themeColor": "#4F46E5",
+  "themeColorDark": "#11111A",
+  "navigationColor": "#000000",
+  "navigationColorDark": "#000000",
+  "navigationDividerColor": "#00000000",
+  "navigationDividerColorDark": "#00000000",
+  "backgroundColor": "#0D0D12",
+  "enableNotifications": false,
+  "startUrl": "https://arena.ai/",
+  "iconUrl": "https://arena.ai/icons/icon-512.png",
+  "maskableIconUrl": "https://arena.ai/icons/icon-maskable-512.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "android"
+  },
+  "appVersion": "1.0.0",
+  "appVersionCode": 1,
+  "minSdkVersion": 21,
+  "orientation": "portrait",
+  "webManifestUrl": "https://arena.ai/manifest.json",
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "displayOverride": [],
+  "shortcuts": []
+}

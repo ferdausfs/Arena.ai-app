@@ -1,0 +1,35 @@
+# Local Android / Gradle configuration files (never commit these)
+local.properties
+keystore.properties
+*.keystore
+*.jks
+*.jks.old
+
+# Signing / secret material
+*.p12
+*.pem
+service-account.json
+google-services.json
+
+# OS / IDE files
+.DS_Store
+*.iml
+.idea/
+.gradle/
+.kotlin/
+
+# Build outputs
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Bubblewrap / Node local tooling
+node_modules/
+android-tools/
+jdk/
+bubblewrap-cli/
+
+# Generated secrets / logs
+*.log
