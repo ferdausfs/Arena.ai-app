@@ -300,6 +300,6 @@ object WebViewManager {
      */
     fun restoreState(savedInstanceState: android.os.Bundle): Boolean {
         val restored = webView?.restoreState(savedInstanceState)
-        return restored != null && restored.size() > 0
+        return restored != null && restored.size > 0
     }
 }
