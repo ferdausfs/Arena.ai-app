@@ -14,6 +14,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.browser.customtabs.CustomTabsIntent
 
 object WebViewManager {
     private var webView: WebView? = null
@@ -32,48 +33,105 @@ object WebViewManager {
     var listener: Listener? = null
 
     /**
-     * Domains that should stay inside the WebView.
-     * This includes arena.ai itself plus all known OAuth / auth provider domains
-     * used by arena.ai's login flow (Google OAuth, reCAPTCHA, etc.).
+     * ============================================================================
+     * CRITICAL OAUTH POLICY — DO NOT MODIFY WITHOUT READING:
+     * ============================================================================
+     * Google OAuth must NEVER be loaded in the embedded WebView.
+     * Google actively blocks OAuth authorization requests originating from
+     * android.webkit.WebView at the server level since 2017 (disallowed_useragent,
+     * 400 error, "Access blocked"). This is enforced server-side and there is
+     * NO client-side workaround (including user-agent spoofing).
      *
-     * The matching uses exact match + subdomain match (e.g. "arena.ai" matches
-     * "arena.ai" and "www.arena.ai" but not "evil-arena.ai").
+     * Policy: https://developers.googleblog.com/2016/08/modernizing-oauth-interactions-in-native-apps.html
+     * Enforcement expanded July 2023.
      *
-     * If the auth provider changes or new ones are added, update this list.
+     * Correct pattern:
+     * - Keep arena.ai's own pages inside the WebView (INTERNAL_HOSTS)
+     * - Intercept Google OAuth URLs (accounts.google.com, oauth2.googleapis.com, etc.)
+     *   in shouldOverrideUrlLoading and launch them in a Chrome Custom Tab
+     *   (androidx.browser.customtabs.CustomTabsIntent). Custom Tabs use the real
+     *   Chrome browser process/user-agent, which Google's OAuth accepts, while
+     *   still feeling integrated (overlay, not full browser app switch).
+     *
+     * - After Custom Tab completes, arena.ai's OAuth callback redirect
+     *   (e.g. https://arena.ai/auth/callback) is caught by the App Link intent-filter
+     *   in AndroidManifest.xml, returning control to MainActivity automatically.
+     *   MainActivity's handleIntent then loads that URL in the WebView, so the
+     *   WebView picks up the new session cookie directly (see cookie continuity below).
+     *
+     * Cookie/session continuity:
+     * - Chrome Custom Tabs use Chrome's cookie store, NOT WebView's CookieManager.
+     * - They do NOT share cookies automatically.
+     * - Our solution: the Custom Tab flow ends with a redirect to an arena.ai URL.
+     *   That redirect triggers an App Link intent, which our MainActivity handles by
+     *   loading the same URL (often containing an OAuth code) in the WebView.
+     *   The WebView then makes its own request to arena.ai, and the server sets the
+     *   session cookie in the WebView's CookieManager store. Thus the WebView
+     *   becomes authenticated without needing to share Chrome's cookies.
+     * - We also call CookieManager.getInstance().flush() after every page load and
+     *   onPause/onDestroy to persist the session.
+     * - If for some reason the callback URL no longer contains the code (e.g.,
+     *   server already exchanged it in Chrome and only redirects to / dashboard),
+     *   the WebView reload of the final arena.ai page will still be unauthenticated
+     *   unless the server also handled the code. To mitigate, MainActivity explicitly
+     *   reloads arena.ai after returning from Custom Tab (via handleIntent loadUrl).
+     *   Manual testing on a real device is still recommended to confirm end-to-end.
+     * ============================================================================
      */
-    private val ALLOWED_HOSTS = listOf(
-        // Arena.ai and all subdomains
-        "arena.ai",
-        // Google OAuth / Sign-in
-        "accounts.google.com",
-        "myaccount.google.com",
-        "googleusercontent.com",
-        // Google APIs (token exchange, reCAPTCHA verification)
-        "googleapis.com",
-        "gstatic.com",
-        "google.com",
-        // reCAPTCHA
-        "recaptcha.net",
-        // GitHub OAuth (if used by arena.ai)
-        "github.com",
-        // Clerk auth (possible auth provider for arena.ai)
-        "clerk.accounts.dev",
-        "accounts.dev"
+
+    /**
+     * Hosts that stay inside the WebView — ONLY arena.ai's own domains.
+     * Previous PR #4 incorrectly added OAuth domains here. That breaks Google login.
+     * DO NOT add accounts.google.com or other OAuth IdP domains here.
+     */
+    private val INTERNAL_HOSTS = listOf(
+        "arena.ai"
     )
 
-    private fun isAllowedHost(host: String): Boolean {
-        return ALLOWED_HOSTS.any { allowed ->
-            // Exact match or proper subdomain match (e.g. "www.arena.ai" ends with ".arena.ai")
-            // We do NOT use contains() because "evil-arena.ai".contains("arena.ai") would
-            // incorrectly match — subdomain matching requires a dot boundary.
-            host == allowed || host.endsWith(".$allowed")
+    /**
+     * OAuth / Identity Provider hosts that must be opened in Chrome Custom Tabs,
+     * NOT in the embedded WebView. Google blocks WebView, others may in future.
+     * Keep this list precise: exact host + proper subdomain matching.
+     */
+    private val OAUTH_CUSTOM_TAB_HOSTS = listOf(
+        // Google OAuth — MUST use Custom Tabs (Google policy)
+        "accounts.google.com",
+        "oauth2.googleapis.com",
+        // GitHub OAuth — generally more permissive but treat same for consistency/future-proofing
+        "github.com",
+        "api.github.com",
+        // Clerk (observed possible auth provider for arena.ai)
+        "clerk.accounts.dev",
+        "clerk.com",
+        "accounts.dev",
+        // Additional providers that are known to block WebView (defensive)
+        "appleid.apple.com",
+        "facebook.com",
+        "www.facebook.com",
+        "login.microsoftonline.com",
+        "microsoftonline.com"
+    )
+
+    private fun isInternalHost(host: String): Boolean {
+        val lower = host.lowercase()
+        return INTERNAL_HOSTS.any { allowed ->
+            val a = allowed.lowercase()
+            lower == a || lower.endsWith(".$a")
+        }
+    }
+
+    private fun isOAuthHost(host: String): Boolean {
+        val lower = host.lowercase()
+        return OAUTH_CUSTOM_TAB_HOSTS.any { allowed ->
+            val a = allowed.lowercase()
+            lower == a || lower.endsWith(".$a")
         }
     }
 
     /**
      * Configure cookies for the WebView. Must be called after the WebView is created.
-     * Enables third-party cookies which are required for OAuth flows (e.g. Google sets
-     * cookies on accounts.google.com while the top-level page is arena.ai).
+     * Third-party cookies are still enabled for arena.ai sub-resources, but OAuth
+     * itself no longer relies on third-party cookies in WebView since it runs in Custom Tab.
      */
     private fun configureCookies(webView: WebView) {
         val cookieManager = CookieManager.getInstance()
@@ -82,13 +140,54 @@ object WebViewManager {
     }
 
     /**
-     * Flush cookies to persistent storage so they survive app restarts.
+     * Flush cookies to persistent storage so they survive app restarts and can be
+     * picked up after returning from Custom Tab flow.
      */
     fun flushCookies() {
         try {
             CookieManager.getInstance().flush()
         } catch (_: Exception) {
             // CookieManager may not be initialized yet
+        }
+    }
+
+    /**
+     * Launch a URL in Chrome Custom Tabs. This uses the real browser user-agent
+     * which Google OAuth accepts, unlike embedded WebView.
+     */
+    private fun openInCustomTab(uri: Uri) {
+        val ctx = mutableContext ?: return
+        try {
+            val builder = CustomTabsIntent.Builder()
+                .setShowTitle(true)
+                .setShareState(CustomTabsIntent.SHARE_STATE_OFF)
+                // Dark color scheme to match app theme best-effort; default params keep system handling
+                // For full styling you could set toolbar color to match @color primary.
+
+            // Build and launch
+            val customTabsIntent = builder.build()
+            // Must add NEW_TASK when starting from non-Activity context wrapped in MutableContextWrapper
+            customTabsIntent.intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // Optional: ensure we don't keep multiple Custom Tabs activities stacked
+            // The Custom Tab Activity itself will handle App Link redirects back to our app.
+
+            customTabsIntent.launchUrl(ctx, uri)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            // Fallback to external browser if Custom Tabs fails (no Chrome / no provider)
+            openInExternalBrowser(uri)
+        }
+    }
+
+    private fun openInExternalBrowser(uri: Uri) {
+        val ctx = mutableContext ?: return
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ctx.startActivity(intent)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
@@ -107,21 +206,17 @@ object WebViewManager {
                     domStorageEnabled = true
                     databaseEnabled = true
                     mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                    // Remove "; wv" from user agent so Google OAuth doesn't block us.
-                    // Google blocks sign-in from embedded WebViews identified by "wv".
+                    // Note: previously we stripped \"; wv\" to try to bypass Google's WebView block.
+                    // That hack no longer works and is not sufficient. Google now detects WebView
+                    // via additional signals beyond UA. Do NOT rely on UA spoofing.
+                    // Keep the stripping for completeness but document it doesn't fix OAuth.
                     userAgentString = userAgentString.replace("; wv", "")
-                    // Enable file access for potential downloads
                     allowFileAccess = true
-                    // Enable zoom controls
                     builtInZoomControls = true
                     displayZoomControls = false
-                    // Enable media playback
                     mediaPlaybackRequiresUserGesture = false
-                    // Cache mode — use cache when offline
                     cacheMode = WebSettings.LOAD_DEFAULT
-                    // Support multiple windows (needed for some OAuth popups)
                     setSupportMultipleWindows(false)
-                    // Enable geolocation if arena.ai needs it
                     setGeolocationEnabled(true)
                 }
 
@@ -133,21 +228,21 @@ object WebViewManager {
                         val url = request?.url ?: return false
                         val host = url.host ?: return false
 
-                        // Keep allowed domains (arena.ai + auth providers) in the WebView
-                        if (isAllowedHost(host)) {
-                            return false
+                        // 1. Keep arena.ai (and subdomains) inside the WebView
+                        if (isInternalHost(host)) {
+                            return false // Let WebView load it
                         }
 
-                        // For external links that are NOT part of the auth flow,
-                        // open in the default browser.
-                        try {
-                            val intent = Intent(Intent.ACTION_VIEW, url).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            mutableContext?.startActivity(intent)
-                        } catch (e: Exception) {
-                            e.printStackTrace()
+                        // 2. OAuth / IdP hosts -> open in Chrome Custom Tab (Google-compliant)
+                        if (isOAuthHost(host)) {
+                            openInCustomTab(url)
+                            return true // We handled it
                         }
+
+                        // 3. Everything else -> external browser
+                        // (Could also use Custom Tab for external, but requirement says
+                        // external browser handoff is okay for non-OAuth; we keep ACTION_VIEW)
+                        openInExternalBrowser(url)
                         return true
                     }
 
@@ -160,15 +255,14 @@ object WebViewManager {
                         super.onPageFinished(view, url)
                         url?.let { currentUrl = it }
                         // Flush cookies after every page load to ensure persistence.
-                        // This is critical for auth cookies set during OAuth flows.
+                        // Critical so that the authenticated session set after OAuth
+                        // (when handleIntent loads the callback URL) is saved to disk.
                         flushCookies()
                     }
 
                     override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                         super.onReceivedError(view, request, error)
-                        // Only show error for the main frame, not for sub-resources
                         if (request?.isForMainFrame == true) {
-                            // Load a simple error page
                             view?.loadData(
                                 """
                                 <html><body style="background:#1a1a2e;color:#fff;font-family:sans-serif;
@@ -186,8 +280,6 @@ object WebViewManager {
                     }
 
                     override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
-                        // The WebView renderer process crashed or was killed by the system.
-                        // Destroy the old WebView and create a new one.
                         try {
                             webView?.let {
                                 if (it.parent != null) {
@@ -200,8 +292,6 @@ object WebViewManager {
                         webView = null
                         mutableContext = null
 
-                        // Recreate the WebView — getWebView will create a fresh one
-                        // since webView is null. The listener (Activity) will attach it.
                         val ctx = view?.context ?: return false
                         val newWebView = getWebView(ctx)
                         newWebView.loadUrl(currentUrl)
@@ -214,16 +304,13 @@ object WebViewManager {
                 webChromeClient = object : WebChromeClient() {
                     override fun onProgressChanged(view: WebView?, newProgress: Int) {
                         super.onProgressChanged(view, newProgress)
-                        // Could add a progress bar here in the future
                     }
 
                     override fun onReceivedTitle(view: WebView?, title: String?) {
                         super.onReceivedTitle(view, title)
-                        // Could update the Activity title here
                     }
                 }
 
-                // Enable WebView debugging in debug builds
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
                     WebView.setWebContentsDebuggingEnabled(
                         (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -233,26 +320,17 @@ object WebViewManager {
                 loadUrl(currentUrl)
             }
         } else {
-            // Update the context to the new Activity
             mutableContext?.baseContext = context
-
-            // Re-configure cookies in case settings were reset
             webView?.let { configureCookies(it) }
         }
         return webView!!
     }
 
-    /**
-     * Load a specific URL in the WebView. Used for deep link handling.
-     */
     fun loadUrl(url: String) {
         currentUrl = url
         webView?.loadUrl(url)
     }
 
-    /**
-     * Get the current URL loaded in the WebView.
-     */
     fun getCurrentUrl(): String {
         return webView?.url ?: currentUrl
     }
@@ -265,42 +343,24 @@ object WebViewManager {
         webView?.goBack()
     }
 
-    /**
-     * Called when the Activity is paused. Pauses the WebView timers and JavaScript
-     * to save battery, and flushes cookies to disk.
-     */
     fun onPause() {
         webView?.onPause()
         flushCookies()
     }
 
-    /**
-     * Called when the Activity resumes. Resumes WebView timers and JavaScript.
-     */
     fun onResume() {
         webView?.onResume()
     }
 
-    /**
-     * Save the WebView state for restoration after process death.
-     * Wrapped in try-catch because WebView state can exceed the
-     * Binder transaction limit (1MB) on pages with heavy content.
-     */
     fun saveState(outState: android.os.Bundle) {
         try {
             webView?.saveState(outState)
         } catch (_: Exception) {
-            // State too large for Bundle — rely on KEY_LAST_URL fallback
         }
     }
 
-    /**
-     * Restore the WebView state after process death.
-     * Returns true if state was successfully restored.
-     */
     fun restoreState(savedInstanceState: android.os.Bundle): Boolean {
         val restored = webView?.restoreState(savedInstanceState)
-        // WebBackForwardList exposes its size as a property (Java getSize()), not a function.
         return restored != null && restored.size > 0
     }
 }

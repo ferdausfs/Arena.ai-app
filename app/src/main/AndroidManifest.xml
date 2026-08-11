@@ -11,6 +11,18 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Required for Android 11+ package visibility: query browsers supporting Custom Tabs.
+         Without this, CustomTabsIntent may fail to resolve the Custom Tabs service on API 30+. -->
+    <queries>
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+
     <application
         android:name=".ArenaApp"
         android:allowBackup="true"
