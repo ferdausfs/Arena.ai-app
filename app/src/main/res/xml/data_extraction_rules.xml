@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backup / transfer rules for Android 12 and above (android:dataExtractionRules).
+
+  Same policy as backup_rules.xml, split into the two flows the platform distinguishes:
+
+  - cloud-backup:   Google Drive backup. Only the small session preferences file.
+  - device-transfer: direct device-to-device copy during setup. Same set; the WebView's
+                     authenticated storage is still excluded, because the user should sign in
+                     again on the new device rather than have a live session cloned onto it.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include
+            domain="sharedpref"
+            path="arena_session.xml" />
+
+        <exclude domain="database" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="root" path="." />
+    </cloud-backup>
+
+    <device-transfer>
+        <include
+            domain="sharedpref"
+            path="arena_session.xml" />
+
+        <exclude domain="database" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="root" path="." />
+    </device-transfer>
+</data-extraction-rules>

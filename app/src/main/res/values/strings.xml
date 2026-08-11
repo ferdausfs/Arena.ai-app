@@ -1,42 +1,85 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-    Copyright 2021 Google Inc. All Rights Reserved.
-
-     Licensed under the Apache License, Version 2.0 (the "License");
-     you may not use this file except in compliance with the License.
-     You may obtain a copy of the License at
-
-         http://www.apache.org/licenses/LICENSE-2.0
-
-     Unless required by applicable law or agreed to in writing, software
-     distributed under the License is distributed on an "AS IS" BASIS,
-     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-     See the License for the specific language governing permissions and
-     limitations under the License.
--->
 <resources>
-  
 
-  <!--
-    The "fullscreen" and "fullscreen-sticky" TWA manifest values correspond to "immersive" and "sticky-immersive"
-    AndroidManifest values.
-  -->
-  
+    <!-- Application -->
+    <string name="app_name">Arena AI</string>
 
-  <!--
-    This variable below expresses the relationship between the app and the site,
-    as documented in the TWA documentation at
-    https://developers.google.com/web/updates/2017/10/using-twa#set_up_digital_asset_links_in_an_android_app
-    and is injected into the AndroidManifest.xml
-  -->
-  <string name="assetStatements">
-    [{
-        \"relation\": [\"delegate_permission/common.handle_all_urls\"],
-        \"target\": {
-            \"namespace\": \"web\",
-            \"site\": \"https://arena.ai\"
-        }
-    }]
-    
-  </string>  
+    <!-- Ongoing foreground-service notification -->
+    <string name="notification_channel_name">Background session</string>
+    <string name="notification_channel_description">Keeps the Arena AI page loaded in memory so it
+        does not have to reload when you come back to the app.</string>
+    <string name="notification_title">Arena AI is running</string>
+    <string name="notification_text">Your session stays loaded in the background. Tap to open.</string>
+    <string name="notification_action_stop">Stop</string>
+
+    <!-- Notification permission -->
+    <string name="notification_rationale_title">Notification hidden</string>
+    <string name="notification_rationale_message">Arena AI keeps your session loaded using a
+        background service, and Android requires that service to show an ongoing notification.
+        Without notification permission the service still runs, but you will not see the
+        notification and will not have its quick “Stop” button — you can always stop the session
+        from the menu inside the app.\n\nYou can grant the permission later in Settings → Apps →
+        Arena AI → Notifications.</string>
+
+    <!-- Battery optimization -->
+    <string name="battery_dialog_title">Keep Arena AI running</string>
+    <string name="battery_dialog_message">Android and most phone makers (Samsung, Xiaomi, OPPO,
+        Huawei and others) aggressively put background apps to sleep to save battery. If that
+        happens to Arena AI, your page is unloaded and has to reload the next time you open the
+        app.\n\nTo prevent that, exclude Arena AI from battery optimization. On the next screen,
+        find <b>Arena AI</b> and set it to <b>Don\'t optimize</b> / <b>Unrestricted</b>.</string>
+    <string name="battery_dialog_message_already_exempt">Arena AI is already excluded from battery
+        optimization — that is the setting we need.\n\nSome phone makers add a second, separate
+        switch (often called “Sleeping apps”, “Auto-launch”, “App battery usage” or “Protected
+        apps”). If your session still gets unloaded, look for that setting too.</string>
+    <string name="battery_dialog_open_settings">Open settings</string>
+    <string name="battery_dialog_later">Not now</string>
+    <string name="battery_dialog_never">Don\'t ask again</string>
+    <string name="battery_toast_find_app">Find “Arena AI” in the list and choose “Don\'t
+        optimize”.</string>
+    <string name="battery_toast_app_details">Open “Battery” and choose “Unrestricted”.</string>
+    <string name="battery_toast_manual">Open Settings → Apps → Arena AI → Battery and choose
+        “Unrestricted”.</string>
+
+    <!-- Menu -->
+    <string name="action_reload">Reload page</string>
+    <string name="action_battery">Battery settings</string>
+    <string name="action_stop_session">Stop session</string>
+    <string name="action_ok">OK</string>
+    <string name="action_cancel">Cancel</string>
+
+    <!-- Stop-session confirmation -->
+    <string name="stop_dialog_title">Stop the session?</string>
+    <string name="stop_dialog_message">This unloads the page from memory and closes Arena AI. The
+        next time you open the app the page will load again from the start.\n\nYou stay signed
+        in.</string>
+    <string name="stop_dialog_confirm">Stop</string>
+
+    <!-- Error screen -->
+    <string name="error_title">Can\'t reach arena.ai</string>
+    <string name="error_message">Check your internet connection and try again.</string>
+    <string name="error_retry">Try again</string>
+    <string name="error_detail_format">%1$s (code %2$d)</string>
+    <string name="error_generic_detail">The page could not be loaded.</string>
+    <string name="error_no_app_for_link">No app on this device can open that link.</string>
+    <string name="error_download_unsupported">This download type is not supported.</string>
+    <string name="error_download_failed">The download could not be started.</string>
+    <string name="download_started">Downloading %1$s…</string>
+
+    <!-- Content descriptions -->
+    <string name="cd_loading">Loading</string>
+
+    <!--
+      Justification for the "specialUse" foreground service type, read by the platform from the
+      service's PROPERTY_SPECIAL_USE_FGS_SUBTYPE property. The same text must be entered in the
+      Play Console under Policy → App content → Foreground service permissions.
+
+      Not translatable: it is reviewed by Google, not shown to users.
+    -->
+    <string name="fgs_special_use_justification" translatable="false">Keeps the user\'s arena.ai
+        web session loaded in memory so that returning to the app resumes the exact same page,
+        with no reload and no loss of in-progress work. The service is started by an explicit user
+        action and runs only until the user stops it from the notification or from inside the
+        app.</string>
+
 </resources>

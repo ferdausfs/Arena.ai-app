@@ -1,237 +1,466 @@
-# Arena AI — Android App (Trusted Web Activity)
+# Arena AI — Android App (native WebView + foreground session)
 
-An installable Android app that wraps **https://arena.ai** using a **Trusted Web
-Activity (TWA)**. A TWA runs the site in a **full-screen Chrome Custom Tab** —
-Chrome's engine, not a plain WebView — so the website behaves exactly as it
-does in the browser, including logins, cookies, and Chrome features.
+A native Android wrapper for **[arena.ai](https://arena.ai)** whose defining feature is that
+**the page stays loaded**. Open the app a day later and you are on the same screen, with the same
+scroll position and the same half-typed message — not on a freshly reloaded home page.
 
-This project was generated with [Bubblewrap](https://github.com/GoogleChromeLabs/bubblewrap)
-and is built automatically by **GitHub Actions** into an APK that you can
-install on any Android phone.
+- **Package:** `com.federal.arenaai`
+- **App name:** Arena AI
+- **Site:** `https://arena.ai`
+- **Language:** Java 17
+- **Min / target / compile SDK:** 24 / 36 / 36
 
 ---
 
 ## Table of contents
 
 1. [What this project is](#1-what-this-project-is)
-2. [Project structure](#2-project-structure)
-3. [Key behaviors (how the requirements are met)](#3-key-behaviors)
-4. [Building it locally](#4-building-it-locally)
-5. [The CI/CD pipeline](#5-the-cicd-pipeline)
-6. [Installing the APK on your phone](#6-installing-the-apk-on-your-phone)
-7. [Publishing to the Play Store](#7-publishing-to-the-play-store)
-8. [Digital Asset Links (domain verification)](#8-digital-asset-links-domain-verification)
-9. [Security notes](#9-security-notes)
-10. [What still needs manual action from you](#10-what-still-needs-manual-action-from-you)
+2. [Why the Trusted Web Activity was replaced](#2-why-the-trusted-web-activity-was-replaced)
+3. [Architecture](#3-architecture)
+4. [Honest limitations](#4-honest-limitations--read-this-one)
+5. [Project structure](#5-project-structure)
+6. [Behaviour reference](#6-behaviour-reference)
+7. [SDK levels and why](#7-sdk-levels-and-why)
+8. [Building locally](#8-building-locally)
+9. [CI/CD](#9-cicd)
+10. [Installing on a phone](#10-installing-on-a-phone)
+11. [Signing and security](#11-signing-and-security)
+12. [Deep links / Digital Asset Links](#12-deep-links--digital-asset-links)
+13. [Publishing to Google Play](#13-publishing-to-google-play)
+14. [What needs manual action from you](#14-what-needs-manual-action-from-you)
 
 ---
 
 ## 1. What this project is
 
-This repository contains a complete Android Gradle project. When you build it,
-it produces an APK called **Arena AI**. Tapping the app icon on your phone opens
-`https://arena.ai` in a Trusted Web Activity.
+A single-module Gradle project producing an Android APK. The app renders arena.ai in an
+`android.webkit.WebView` that is owned by the *process*, not by the Activity, and is kept resident
+by a user-controlled foreground service.
 
-Because the site itself does **not** currently serve a web manifest
-(`https://arena.ai/manifest.json` returns `404`), this project ships its own
-complete web manifest in [`manifest.json`](./manifest.json) and bundles it into
-the app at build time (`app/src/main/res/raw/web_app_manifest.json`).
+Concretely, the app gives you:
 
-The core Android classes come from Google's
-[`androidx.browser:browser` / `com.google.androidbrowserhelper:androidbrowserhelper`]
-library — this is the official, standard way to build a TWA.
+- The full site, with JavaScript, `localStorage`, `sessionStorage`, IndexedDB and cookies.
+- A session that survives leaving the app, rotating the device, pressing Back, and swiping the app
+  off the recents screen.
+- An ongoing, silent notification ("Arena AI is running") that is both the indicator that the
+  session is live and the way to stop it.
+- In-app navigation confined to `arena.ai`; every other link opens in your default browser.
+- File uploads, downloads, and fullscreen video.
 
-## 2. Project structure
+---
+
+## 2. Why the Trusted Web Activity was replaced
+
+The previous version of this repo was a Bubblewrap-generated **Trusted Web Activity** (TWA): a
+thin `LauncherActivity` from `androidbrowserhelper` that asked Chrome to display arena.ai in a
+Custom Tab without browser chrome.
+
+A TWA is a good way to ship a PWA, and it is the wrong tool here, for one structural reason:
+
+> **In a TWA, your app does not own the browser tab. Chrome does.**
+
+Everything else follows from that:
+
+| TWA constraint | Consequence |
+| --- | --- |
+| The page runs inside Chrome's process, not yours. | You cannot keep it alive. When Chrome discards the tab, the page reloads, and your app has no say in it. |
+| An app cannot raise the priority of another app's process. | A foreground service in your app does nothing for a tab hosted by Chrome. The central requirement of this rebuild is unimplementable in a TWA. |
+| No `WebViewClient` / `WebChromeClient`. | No load progress, no error screen, no retry, no navigation policy, no file-chooser control. You get whatever Chrome does. |
+| Requires Digital Asset Links verification against `arena.ai`. | Without a correctly deployed `assetlinks.json` the app degrades to a Custom Tab *with* a URL bar — visibly not an app. |
+| Behaviour depends on the user's browser. | On a device with an old WebView/browser, or a non-Chromium default, the experience varies or falls back entirely. |
+
+The rebuild moves the page into a WebView the app owns, which makes process priority, lifecycle and
+navigation policy things this codebase can actually control.
+
+---
+
+## 3. Architecture
+
+Four classes carry the design.
+
+### `ArenaWebSession` — the page
+
+A process-scoped singleton holding **one** `WebView`, created against the *application* context.
+
+- The Activity does not create it and does not own it. It borrows it: `attachTo()` adds the view
+  to the Activity's layout, `detach()` removes it again. Neither call touches the page.
+- `WebView.onPause()` and `pauseTimers()` are **never** called. JavaScript timers, WebSockets and
+  in-flight fetches keep running while the app is in the background.
+- The WebView is constructed against a `MutableContextWrapper` whose base is swapped to the current
+  Activity while attached, and back to the application context when not. This is what lets the same
+  WebView show `<select>` dropdowns and JS dialogs (which need a window) without permanently
+  leaking an Activity.
+- It owns the navigation policy, the error reporting, downloads, popups and fullscreen plumbing.
+- If the **renderer** process is killed (`onRenderProcessGone`), the dead WebView is discarded, a
+  new one is built and the last URL is reloaded — instead of the app crashing, which is what
+  returning `false` there would do.
+
+### `ArenaSessionService` — the priority
+
+A foreground service of type `specialUse`.
+
+Android decides what to kill by *process importance*. A process whose only component is a stopped
+Activity is "cached" and is first in line to be reclaimed — that is why ordinary WebView apps reload
+after a while in the background. A process running a foreground service sits near the top of the
+importance list. That is the entire mechanism: the service holds a reference to the session and
+keeps the process important.
+
+- Started by `MainActivity` on first open.
+- Shows a silent, `IMPORTANCE_MIN`, non-dismissable notification with a **Stop** action.
+- `android:stopWithTask="false"` — swiping the app out of recents does not end the session.
+- Stops **only** on an explicit user action: the notification's Stop button, or the in-app
+  overflow → *Stop session* (which confirms first).
+- `START_STICKY`: if the OS kills the process anyway, the service is recreated. If the user had
+  previously stopped the session, the restarted service checks `SessionStore` and exits instead of
+  resurrecting itself.
+
+### `MainActivity` — the window
+
+Owns only what genuinely needs a window: the splash screen, the load progress bar, the error/retry
+screen, the file chooser, the fullscreen video container, the runtime permission flow and the
+dialogs. Attaches the session in `onStart()`, detaches in `onStop()`. `onDestroy()` deliberately does
+**not** destroy the session.
+
+Back behaves like a browser: page history first, and when history is exhausted the app goes to the
+background (`moveTaskToBack`) rather than finishing — so returning is instant.
+
+### `SessionStore` + `UrlPolicy` — the small pieces
+
+`SessionStore` is a `SharedPreferences` wrapper holding the last URL, whether a session is wanted,
+and which prompts have been shown. `UrlPolicy` is deliberately framework-free — plain Java, unit
+tested in `app/src/test/` — and answers one question: does this URL stay in the app, or go to the
+browser? `arena.ai` and its sub-domains stay; a short allow-list of identity providers
+(Google, Apple, GitHub, Microsoft, Auth0, Okta, Clerk, …) also stays so sign-in redirects can
+complete; everything else leaves. Host matching is anchored on a dot, so `notarena.ai` and
+`arena.ai.evil.com` are correctly treated as third-party.
+
+### State restore
+
+Two layers, honestly described:
+
+1. **Process alive (the normal case).** Nothing is "restored" because nothing was lost. The same
+   WebView, the same DOM, the same JS heap.
+2. **Process was killed.** The JavaScript heap is gone and cannot be recovered by any app. What
+   survives is the last URL (persisted on every navigation, including SPA History API navigations)
+   and the WebView's on-disk storage — cookies, `localStorage`, IndexedDB. The next launch reloads
+   that URL, still signed in. Unsubmitted form input and in-flight streaming responses are lost.
+
+---
+
+## 4. Honest limitations — read this one
+
+This app makes an OS kill **much less likely**. It cannot make it impossible. Anyone claiming
+otherwise on Android is selling something.
+
+- **Android can kill any app process at any time.** A foreground service moves you up the
+  low-memory-killer's list; it does not remove you from it. On a device under real memory pressure
+  — a big game, a camera app, a 3 GB phone with 40 apps installed — the session will eventually be
+  reclaimed. When that happens the app comes back at the last URL rather than pretending nothing
+  happened.
+- **OEM battery management is more aggressive than stock Android and does not follow its rules.**
+  Samsung ("Put unused apps to sleep"), Xiaomi/MIUI, Huawei ("protected apps"), OPPO/realme/OnePlus
+  (ColorOS deep optimization), vivo and others freeze or kill backgrounded apps *regardless* of
+  foreground services. See [dontkillmyapp.com](https://dontkillmyapp.com) for the per-vendor detail.
+  On those devices the battery-optimization exemption below is not a nicety; it is the difference
+  between the session surviving and not.
+- **That is why the app asks about battery optimization.** It shows an explanation and opens the
+  system screen where you can exclude it. It cannot grant the exemption for you: the one-tap system
+  dialog needs `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, which Google Play restricts to app categories
+  a web wrapper does not belong to. Declaring it would risk rejection, so the app takes the route
+  that is allowed for every app — explain, then hand you the settings screen. Some OEM skins hide
+  additional per-app switches ("Allow background activity", "Unrestricted") that the app cannot
+  reach at all; those must be set by hand.
+- **A resident WebView costs memory and some battery.** That is the trade the user is making, which
+  is why the session is always visible in the notification shade and always one tap from being
+  stopped.
+- **Killing the app from Settings → Force stop ends everything**, including the service. This is
+  correct and intended: force-stop means force-stop.
+- **The renderer can be killed independently of the app.** Handled by rebuilding and reloading —
+  a visible reload, not a crash.
+- **No offline mode.** With no network, the app shows its error screen with a retry button.
+- **Camera and microphone requests from the page are denied.** The app declares no such permissions;
+  geolocation is disabled too. If arena.ai ever needs them, the permissions must be declared in the
+  manifest and `onPermissionRequest` in `ArenaWebSession` updated to prompt.
+
+---
+
+## 5. Project structure
 
 ```
 .
 ├── app/
-│   ├── build.gradle                  # The app module (SDK versions, signing, resources)
-│   └── src/main/
-│       ├── AndroidManifest.xml       # App manifest (activities, TWA intent-filter, ...)
-│       ├── java/com/federal/arenaai/ # LauncherActivity, Application, DelegationService
-│       └── res/                      # Icons, splash screen, colors, strings, web manifest
-├── gradle/wrapper/                   # Gradle wrapper (pins the Gradle version)
-├── build.gradle                      # Root Gradle build file
-├── settings.gradle                   # Declares the :app module
-├── gradle.properties                 # Gradle/JVM/Android settings
-├── gradlew / gradlew.bat             # Gradle wrapper scripts (build with ./gradlew)
-├── twa-manifest.json                 # Bubblewrap's config for this TWA
-├── manifest.json                     # The web manifest for arena.ai (host this on the site)
-├── icons/                            # App icons (192, 512, maskable) — also for hosting
-├── .well-known/assetlinks.json.example  # Template for the domain-verification file
-├── keystore.properties.example       # Template for local release signing
-├── .gitignore
-└── .github/workflows/build-apk.yml   # The CI/CD pipeline
+│   ├── build.gradle                  App module: SDK levels, signing, BuildConfig, deps
+│   ├── proguard-rules.pro            R8 keeps for WebView clients / JS interfaces
+│   └── src/
+│       ├── main/
+│       │   ├── AndroidManifest.xml   Permissions, Activity, foreground service
+│       │   ├── java/com/federal/arenaai/
+│       │   │   ├── ArenaApplication.java           WebView data dir, memory logging
+│       │   │   ├── ArenaSessionService.java        Foreground service + notification
+│       │   │   ├── ArenaWebSession.java            The process-wide WebView (core)
+│       │   │   ├── BatteryOptimizationHelper.java  Exemption explanation + settings
+│       │   │   ├── MainActivity.java               The window onto the session
+│       │   │   ├── SessionStore.java               SharedPreferences state
+│       │   │   └── UrlPolicy.java                  In-app vs. browser decision
+│       │   └── res/
+│       │       ├── drawable-*/       Splash + notification icons (per density)
+│       │       ├── layout/           activity_main.xml (no <WebView> — see its comment)
+│       │       ├── menu/             Overflow: reload / battery / stop session
+│       │       ├── mipmap-*/         Launcher icons incl. adaptive (API 26+)
+│       │       ├── values/           strings, colors, themes
+│       │       ├── values-night/     Night theme
+│       │       └── xml/              Backup / data-extraction rules
+│       └── test/java/com/federal/arenaai/
+│           └── UrlPolicyTest.java    JVM unit tests for the navigation policy
+├── .github/workflows/build-apk.yml   CI: test → assembleRelease → artifact → release
+├── .well-known/assetlinks.json.example
+├── icons/, store_icon.png, manifest.json   Web/PWA assets for arena.ai itself
+├── keystore.properties.example
+└── build.gradle, settings.gradle, gradle.properties, gradlew, gradle/
 ```
 
-## 3. Key behaviors
+`manifest.json`, `icons/` and `store_icon.png` are **web** assets belonging to the arena.ai site and
+the Play listing. They are not used by the APK build, and are kept because deleting them would
+break whatever deploys them.
 
-| Requirement | How it's implemented |
-|---|---|
-| **Real TWA (Chrome engine, not WebView)** | `LauncherActivity` extends `com.google.androidbrowserhelper.trusted.LauncherActivity`. The fallback strategy is set to `customtabs`, not `webview`. |
-| **Does not reload on resume** | A TWA launches a **Chrome Custom Tab**. When you leave the app and come back, Chrome keeps the existing page in memory — it is **not** recreated. The `LauncherActivity` is declared with `android:alwaysRetainTaskState="true"`, `android:launchMode="singleTask"` and `android:configChanges` for orientation/screen/keyboard/ui changes, so the task (and the open page) is preserved on resume, rotation, launcher re-press and re-launch; a re-launch intent that arrives while the TWA is already running only brings the existing task forward instead of starting a new one (`LauncherActivity.onNewIntent()` / re-entry guard). |
-| **Portrait orientation** | `orientation` is set to `portrait`; this is applied both via the manifest metadata (`SCREEN_ORIENTATION`) and in `LauncherActivity.onCreate()`. |
-| **No push notifications** | `enableNotifications` is `false`. The `DelegationService` (which forwards notification permissions) is disabled (`android:enabled="false"`). |
-| **Splash screen with the app name** | A native splash screen is configured: a full-bleed background color with the app icon and the "Arena AI" name while the site loads, then a smooth fade-out. |
-| **Opens arena.ai links** | The `LauncherActivity` has a `VIEW` intent-filter with `autoVerify=true` for the `arena.ai` host, so links to arena.ai open in the app. |
+---
 
-## 4. Building it locally
+## 6. Behaviour reference
+
+| Situation | What happens |
+| --- | --- |
+| First launch | Splash → service starts → notification permission asked → page loads → battery dialog |
+| Later launches | The already-loaded page appears immediately; no splash wait, no reload |
+| Press Back with history | Page goes back |
+| Press Back with no history | App goes to the background; session stays live |
+| Rotate the device | No Activity recreation (`configChanges`); the page does not blink |
+| Swipe out of recents | Window closes, **session stays live**, notification remains |
+| Tap the notification | Returns to the existing task and the same page |
+| Notification → Stop | Session destroyed, notification removed, app closed |
+| Overflow → Stop session | Confirmation dialog, then the same as above |
+| Tap an `arena.ai` link | Loads in the app |
+| Tap any other link | Opens in the default browser |
+| Tap `mailto:` / `tel:` | Opens the mail app / dialer |
+| `target="_blank"` popup | Routed through the same policy — in-app for arena.ai, browser otherwise |
+| Network failure | Error screen with a retry button |
+| Certificate error | Load cancelled, error screen. Never proceeds — fails closed |
+| HTTP 5xx on the main frame | Error screen (4xx pages are rendered; they usually say something useful) |
+| Renderer killed | WebView rebuilt, last URL reloaded |
+| Download tapped | Handed to Android's DownloadManager, with the session cookie attached |
+| `<input type="file">` | System file chooser |
+| Fullscreen video | Fullscreen container, screen kept awake |
+
+---
+
+## 7. SDK levels and why
+
+| Setting | Value | Reason |
+| --- | --- | --- |
+| `compileSdk` | 36 | Compile against the newest APIs so new platform behaviour can be handled explicitly. |
+| `targetSdk` | 36 | Google Play requires new apps **and updates** to target Android 16 (API 36) from **31 August 2026**. Targeting lower also opts the app into legacy compatibility behaviour that is unhelpful for a foreground-service app. |
+| `minSdk` | 24 | Android 7.0. Below this, WebView, foreground-service and runtime-permission behaviour diverges enough that it would need a second code path for a rounding error's worth of devices. API 24+ covers the overwhelming majority of active devices. |
+
+Platform behaviours the code handles explicitly, all of which are why the target level matters:
+
+- **API 26** — notification channels; adaptive icons; `setRendererPriorityPolicy`.
+- **API 28** — one WebView data directory per process (`ArenaApplication`).
+- **API 31** — `PendingIntent` mutability must be explicit; splash-screen API.
+- **API 33** — `POST_NOTIFICATIONS` runtime permission; `RECEIVER_NOT_EXPORTED` on registration.
+- **API 34** — every foreground service must declare a type; `specialUse` + justification here.
+
+---
+
+## 8. Building locally
 
 ### Prerequisites
 
-* **JDK 17** (e.g. [Eclipse Temurin 17](https://adoptium.net/))
-* **Android Studio** (or the Android command-line tools + SDK Platform **Android 16 / API 36**)
-* A machine with internet access (Gradle downloads dependencies on first run)
+- **JDK 17** (Temurin recommended). AGP 8.x requires it.
+- **Android SDK** with platform `android-36` and build-tools `36.0.0` — via Android Studio, or
+  `cmdline-tools` + `sdkmanager`.
+- No global Gradle install needed; the wrapper (Gradle 8.11.1) is committed.
 
 ### Steps
 
 ```bash
-# 1. Clone the repo (or use your existing clone)
 git clone https://github.com/ferdausfs/Arena.ai-app.git
 cd Arena.ai-app
 
-# 2. (Recommended) point Gradle at your Android SDK.
-#    Android Studio does this automatically. From the command line, create a
-#    local.properties file (this file is git-ignored):
-#       echo "sdk.dir=$HOME/Android/Sdk" > local.properties
+# Point Gradle at your SDK (Android Studio does this for you).
+# local.properties is git-ignored.
+echo "sdk.dir=$HOME/Android/Sdk" > local.properties
 
-# 3. Build the release APK
+# Debug build — signed with the debug key, installable immediately
+./gradlew assembleDebug
+# -> app/build/outputs/apk/debug/app-debug.apk
+
+# Release build — minified and shrunk with R8
 ./gradlew assembleRelease
+# -> app/build/outputs/apk/release/app-release.apk
+
+# Unit tests (fast, no device or emulator needed)
+./gradlew testDebugUnitTest
+# report -> app/build/reports/tests/testDebugUnitTest/index.html
 ```
 
-The APK will be written to:
+Without a `keystore.properties`, `assembleRelease` signs with the **debug** key. The APK installs
+and runs, but cannot be published. See [§11](#11-signing-and-security).
 
-```
-app/build/outputs/apk/release/app-release.apk
-```
+### Changing the site
 
-> If you have not configured a signing keystore yet (see below), the release
-> APK is signed with the **debug key** automatically, so you can still install
-> and test it on your phone.
+`arenaHost` and `arenaStartUrl` at the top of `app/build.gradle` are the single source of truth.
+They flow into `BuildConfig` (used by `UrlPolicy`) and into the manifest's intent filter through a
+manifest placeholder. Change them in one place and rebuild.
 
-> **Windows users:** use `gradlew.bat assembleRelease` instead of `./gradlew`.
+---
 
-### Building a debug APK
+## 9. CI/CD
+
+`.github/workflows/build-apk.yml`, on push to `main`, on `v*` tags, on pull requests, and manually
+via *Run workflow*:
+
+1. Checkout.
+2. JDK 17 (Temurin).
+3. Android SDK + `platforms;android-36`, `build-tools;36.0.0`, licences accepted.
+4. Gradle cache.
+5. Write `keystore.properties` from GitHub Secrets **if they exist**; otherwise log that the debug
+   key will be used.
+6. `./gradlew testDebugUnitTest` — unit tests, with the HTML report uploaded even on failure.
+7. `./gradlew assembleRelease`.
+8. Delete the decoded keystore and `keystore.properties` from the workspace (runs even if the build
+   failed, so signing material can never reach an artifact).
+9. Upload the APK as the `arena-ai-apk` artifact.
+10. On a `v*` tag only: download the artifact and publish a GitHub Release with generated notes.
+
+To cut a release:
 
 ```bash
-./gradlew assembleDebug   # -> app/build/outputs/apk/debug/app-debug.apk
+git tag v2.0.0
+git push origin v2.0.0
 ```
 
-## 5. The CI/CD pipeline
+---
 
-The pipeline lives in [`.github/workflows/build-apk.yml`](.github/workflows/build-apk.yml).
+## 10. Installing on a phone
 
-**It runs when:**
-* you push to the `main` branch, or
-* you click the **"Run workflow"** button (Actions tab → "Build Android APK" → Run workflow), or
-* you push a version tag such as `v1.0.0`.
+1. Download `app-release.apk` (from the CI artifact, the GitHub Release, or your local build).
+2. Copy it to the device and open it.
+3. Allow "Install unknown apps" for whichever app you opened it from.
+4. Install, open, and — on first run — allow notifications and follow the battery prompt.
 
-**What it does:**
-1. **Checkout** the code.
-2. **Set up JDK 17** (Temurin).
-3. **Set up the Android SDK** and install platform 36 / build tools.
-4. **Cache Gradle** for faster runs.
-5. **Prepare signing** — if you have configured the signing GitHub Secrets, the
-   keystore is reconstructed from them; otherwise the debug key is used.
-6. **Build** the release APK with `./gradlew assembleRelease`.
-7. **Upload the APK as a workflow artifact** (`arena-ai-apk`) on **every** run.
-
-**When a tag (`v*`) is pushed**, an extra job runs that **creates a GitHub
-Release** and attaches the APK to it.
-
-**How to download the APK from CI:**
-1. Open the repo on GitHub → **Actions** tab.
-2. Click the latest run → **Artifacts** → download `arena-ai-apk`.
-3. Unzip it — inside is `app-release.apk`.
-
-## 6. Installing the APK on your phone
-
-1. Download the APK to your phone (or transfer it via USB/cable).
-2. On the phone, open **Settings → Security** and enable **"Install unknown
-   apps"** (or "Allow from this source") for the app you'll use to open the APK
-   (e.g. your file manager or browser).
-3. Tap the APK file and confirm the install.
-4. You'll see the **Arena AI** icon in your app drawer. Open it.
-
-> For the TWA to run (rather than fall back to a Custom Tab), Chrome must be
-> installed on the phone, and the Digital Asset Links file must be deployed on
-> `arena.ai` (see section 8). Without the asset-links file the app still opens
-> the site — it just can't "own" the domain, so links may open in the browser.
-
-## 7. Publishing to the Play Store
-
-1. Create a permanent **app signing keystore** (this key must be kept safe —
-   it is what identifies your app forever).
-2. Add the keystore and passwords to **GitHub Secrets** (see section 5 and
-   `.github/workflows/build-apk.yml`):
-   - `KEYSTORE_BASE64` — base64-encoded contents of your `.jks` file
-   - `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`
-3. Push a tag (e.g. `git tag v1.0.0 && git push origin v1.0.0`) → CI builds a
-   properly signed APK and attaches it to a GitHub Release.
-4. Upload that APK to the Google Play Console.
-
-## 8. Digital Asset Links (domain verification)
-
-A TWA needs to prove that the app belongs to `arena.ai`. This is done with a
-file called `assetlinks.json` hosted on the site, at:
-
-```
-https://arena.ai/.well-known/assetlinks.json
-```
-
-A template is committed here: [`.well-known/assetlinks.json.example`](.well-known/assetlinks.json.example).
-
-```json
-[
-  {
-    "relation": ["delegate_permission/common.handle_all_urls"],
-    "target": {
-      "namespace": "android_app",
-      "package_name": "com.federal.arenaai",
-      "sha256_cert_fingerprints": [
-        "REPLACE_WITH_THE_SHA256_FINGERPRINT_OF_YOUR_SIGNING_CERTIFICATE"
-      ]
-    }
-  }
-]
-```
-
-**To fill in the fingerprint** (after you have a signing keystore), run:
+Or over ADB:
 
 ```bash
-keytool -list -v -keystore your-release.jks -alias your-alias
+adb install -r app/build/outputs/apk/release/app-release.apk
 ```
 
-Copy the 32-byte **SHA256 certificate fingerprint** (colons are fine) into the
-file, then deploy it at `https://arena.ai/.well-known/assetlinks.json`. Verify
-with Google's [Digital Asset Links API](https://developers.google.com/digital-asset-links/tools/generator).
+> A debug-signed and a release-signed build cannot be installed over each other. Uninstall first if
+> you see `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
 
-> Because there is no signing key yet, this file cannot be finalized in this
-> repository — this is expected and is a normal manual step before release.
+---
 
-The app also declares the same relationship in `AndroidManifest.xml` via the
-`asset_statements` metadata (see `app/src/main/res/values/strings.xml`).
+## 11. Signing and security
 
-## 9. Security notes
+**There are no credentials in this repository, and there must never be any.** `.gitignore` excludes
+`local.properties`, `keystore.properties`, `*.jks`, `*.keystore`, `*.p12`, `*.pem`,
+`service-account.json` and `google-services.json`.
 
-* **No API keys, tokens, or credentials are hardcoded anywhere** in this
-  repository.
-* Signing credentials are supplied **only** through GitHub Secrets and a local
-  `keystore.properties` file — both are excluded from git.
-* `.gitignore` excludes `local.properties`, `keystore.properties`, `*.keystore`,
-  `*.jks`, generated secret files, and build outputs.
+### Create a keystore
 
-## 10. What still needs manual action from you
+```bash
+keytool -genkeypair -v \
+  -keystore arenaai-release.jks \
+  -keyalg RSA -keysize 4096 -validity 10000 \
+  -alias arenaai
+```
 
-1. **Deploy the web manifest + icons on arena.ai** so the PWA metadata is served
-   at `https://arena.ai/manifest.json` (and icons under `/icons/`). This is
-   optional for the APK to work, but recommended for a complete PWA/TWA setup.
-2. **Create a real signing keystore** and configure the GitHub Secrets (see
-   sections 5 and 7). Until then, CI produces debug-signed APKs (fine for
-   testing, **not** for the Play Store).
-3. **Host `assetlinks.json`** at `https://arena.ai/.well-known/assetlinks.json`
-   with the real certificate fingerprint (see section 8). Without it, the app
-   can't take over arena.ai links on devices.
-4. **Push this branch/commit to `main`** to trigger the first CI build.
-5. (Optional) **Publish to the Google Play Console** once signed.
+Keep it safe and backed up. Losing it means you can never update the app on Play under the same
+package name.
+
+### Local signing
+
+```bash
+cp keystore.properties.example keystore.properties
+# then fill in storeFile / storePassword / keyAlias / keyPassword
+```
+
+### CI signing
+
+Repository → Settings → Secrets and variables → Actions:
+
+| Secret | Value |
+| --- | --- |
+| `KEYSTORE_BASE64` | `base64 -w 0 arenaai-release.jks` (macOS: `base64 -i arenaai-release.jks`) |
+| `KEYSTORE_PASSWORD` | The keystore password |
+| `KEY_ALIAS` | The key alias (e.g. `arenaai`) |
+| `KEY_PASSWORD` | The key password |
+
+If they are absent the workflow still succeeds and produces a debug-signed APK.
+
+### Other security properties of the build
+
+- `usesCleartextTraffic="false"` — no plaintext HTTP, at all.
+- `setMixedContentMode(MIXED_CONTENT_NEVER_ALLOW)` — no downgraded sub-resources.
+- SSL errors are **never** bypassed; the load is cancelled and the error screen is shown.
+- `setAllowFileAccess(false)` and `setAllowContentAccess(false)` — the page cannot reach `file://`
+  or `content://` URIs.
+- No `addJavascriptInterface` anywhere: the page has no bridge into app code.
+- Geolocation, camera and microphone requests from the page are denied.
+- The session-stopped broadcast is registered `RECEIVER_NOT_EXPORTED` and sent package-scoped.
+- Backup rules include only the small preferences file — cookies and web storage are excluded from
+  cloud backup and device transfer, so an authenticated session is never copied off the device.
+
+---
+
+## 12. Deep links / Digital Asset Links
+
+The manifest handles `https://arena.ai/…` and `https://*.arena.ai/…`, deliberately **without**
+`android:autoVerify="true"`. The app therefore appears in the normal "Open with" chooser.
+
+To make arena.ai links open in the app automatically, host
+`https://arena.ai/.well-known/assetlinks.json` (see `.well-known/assetlinks.json.example`) with the
+release certificate's SHA-256 fingerprint:
+
+```bash
+keytool -list -v -keystore arenaai-release.jks -alias arenaai | grep SHA256
+```
+
+Then add `android:autoVerify="true"` to the VIEW intent filter and rebuild. Verify with:
+
+```bash
+adb shell pm get-app-links com.federal.arenaai
+```
+
+If you publish through Play App Signing, use the fingerprint Play shows you — not your upload key's.
+
+---
+
+## 13. Publishing to Google Play
+
+1. Build an App Bundle: `./gradlew bundleRelease`
+   (`app/build/outputs/bundle/release/app-release.aab`).
+2. Create the app in the Play Console under `com.federal.arenaai`.
+3. **Declare the foreground service.** Policy → App content → *Foreground service permissions*.
+   Select **Special use** and paste the justification, which is kept verbatim in
+   `res/values/strings.xml` as `fgs_special_use_justification` and is also in the manifest as
+   `PROPERTY_SPECIAL_USE_FGS_SUBTYPE`. Google reviews this text; a mismatch is a rejection.
+4. Complete the data safety form. The app itself collects nothing; the website may.
+5. Upload the AAB, fill in the listing, and roll out.
+
+Note that Play also reviews whether a wrapper app adds enough value over the website. The persistent
+session, native error handling and link routing here are the argument.
+
+---
+
+## 14. What needs manual action from you
+
+Nothing in the repository is a stub, but four things live outside it:
+
+1. **Create and store a release keystore**, then add the four GitHub Secrets in
+   [§11](#11-signing-and-security). Until then CI produces a debug-signed APK.
+2. **Deploy `assetlinks.json`** to arena.ai and add `autoVerify="true"` if you want automatic deep
+   linking ([§12](#12-deep-links--digital-asset-links)).
+3. **Fill in the Play Console foreground-service declaration** with the justification string
+   ([§13](#13-publishing-to-google-play)).
+4. **Test on real OEM hardware** — ideally a Samsung and a Xiaomi — with and without the battery
+   exemption. That is where background survival is actually decided, and no amount of correct code
+   substitutes for measuring it.

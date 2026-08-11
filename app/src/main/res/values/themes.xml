@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      The app theme.
+
+      Based on the DayNight variant so the action bar and window chrome follow the system
+      setting, matching the WebView's algorithmic-darkening behaviour.
+    -->
+    <style name="Theme.ArenaAI" parent="Theme.AppCompat.DayNight.DarkActionBar">
+        <item name="colorPrimary">@color/brand</item>
+        <item name="colorPrimaryDark">@color/brand_dark</item>
+        <item name="colorAccent">@color/brand</item>
+        <item name="android:colorBackground">@color/background</item>
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:navigationBarColor">@color/navigation_bar</item>
+        <item name="android:statusBarColor">@color/brand_dark</item>
+    </style>
+
+    <!--
+      Launch theme: the androidx SplashScreen back-port. The Activity swaps to Theme.ArenaAI in
+      installSplashScreen(), which is called before super.onCreate().
+    -->
+    <style name="Theme.ArenaAI.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/background</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.ArenaAI</item>
+        <!-- Only honoured on API 31+; harmless below, where the back-port draws the icon itself. -->
+        <item name="windowSplashScreenAnimationDuration" tools:targetApi="31">300</item>
+    </style>
+
+</resources>

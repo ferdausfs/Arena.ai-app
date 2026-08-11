@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto Backup rules for Android 11 and below (android:fullBackupContent).
+
+  Only the small "arena_session" preferences file is backed up: the last URL and the user's
+  session/prompt choices. Restoring those onto a new device puts the user back on the page they
+  were last using.
+
+  Everything else is deliberately excluded. WebView cookies, localStorage and IndexedDB hold the
+  user's authenticated session; copying them to another device would move credentials off the
+  device they were issued on, and a restored-but-stale cookie jar produces confusing half
+  logged-in states. Caches are worthless once restored.
+-->
+<full-backup-content>
+    <include
+        domain="sharedpref"
+        path="arena_session.xml" />
+
+    <exclude domain="database" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="external" path="." />
+    <exclude domain="root" path="." />
+
+    <!-- WebView state: cookies, localStorage, IndexedDB, service-worker and HTTP caches. -->
+    <exclude domain="file" path="app_webview" />
+    <exclude domain="file" path="webview" />
+    <exclude domain="database" path="webview.db" />
+    <exclude domain="database" path="webviewCookiesChromium.db" />
+</full-backup-content>

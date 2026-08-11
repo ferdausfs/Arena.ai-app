@@ -1,18 +1,15 @@
-<!--
-    Copyright 2020 Google Inc. All Rights Reserved.
-
-     Licensed under the Apache License, Version 2.0 (the "License");
-     you may not use this file except in compliance with the License.
-     You may obtain a copy of the License at
-
-         http://www.apache.org/licenses/LICENSE-2.0
-
-     Unless required by applicable law or agreed to in writing, software
-     distributed under the License is distributed on an "AS IS" BASIS,
-     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-     See the License for the specific language governing permissions and
-     limitations under the License.
--->
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="shortcut_background">#F5F5F5</color>
+    <!-- Brand colours, carried over from the previous web-manifest configuration so the app
+         keeps its identity across the rebuild. -->
+    <color name="brand">#4F46E5</color>
+    <color name="brand_dark">#11111A</color>
+
+    <!-- Window/WebView background. Matching them avoids a white flash before first paint. -->
+    <color name="background">#0D0D12</color>
+
+    <color name="surface">#16161F</color>
+    <color name="on_background">#F5F5F7</color>
+    <color name="on_background_muted">#A0A0AE</color>
+    <color name="navigation_bar">#0D0D12</color>
 </resources>

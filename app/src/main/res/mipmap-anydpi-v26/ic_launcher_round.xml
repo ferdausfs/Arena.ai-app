@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Adaptive launcher icon (API 26+): brand-coloured background with the white "A" mark on top.
+  Round adaptive launcher icon (API 26+): brand-coloured background with the white "A" mark on top.
 
   The previous TWA-generated icon drew a white glyph on a white background, which made the mark
   invisible on every API 26+ launcher. This version uses the brand colour as the background layer.

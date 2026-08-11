@@ -1,1 +1,3 @@
+rootProject.name = 'Arena AI'
+
 include ':app'

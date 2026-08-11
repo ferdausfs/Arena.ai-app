@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+      Night variant of the app theme.
+
+      The base palette in values/colors.xml is already dark (the site's own chrome is dark), so
+      the difference here is small and deliberate: in night mode the status bar drops to the same
+      near-black as the window so the app reads as one continuous surface, whereas in day mode it
+      keeps the lighter brand-dark bar that separates it from a light-ish page background.
+
+      Theme.ArenaAI.Splash inherits from Theme.SplashScreen and needs no night override: its
+      background already resolves through @color/background, and postSplashScreenTheme points at
+      Theme.ArenaAI, which is resolved per-configuration at the moment it is applied.
+    -->
+    <style name="Theme.ArenaAI" parent="Theme.AppCompat.DayNight.DarkActionBar">
+        <item name="colorPrimary">@color/brand</item>
+        <item name="colorPrimaryDark">@color/brand_dark</item>
+        <item name="colorAccent">@color/brand</item>
+        <item name="android:colorBackground">@color/background</item>
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:navigationBarColor">@color/navigation_bar</item>
+        <item name="android:statusBarColor">@color/background</item>
+    </style>
+
+</resources>
