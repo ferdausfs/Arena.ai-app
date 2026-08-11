@@ -73,7 +73,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    compileSdkVersion 35
+    compileSdkVersion 36
     namespace "com.federal.arenaai"
 
     signingConfigs {
