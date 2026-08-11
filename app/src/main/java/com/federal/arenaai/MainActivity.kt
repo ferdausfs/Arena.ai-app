@@ -19,32 +19,17 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 
 /**
- * MainActivity hosts the Arena.ai WebView and handles App Links for OAuth callbacks.
+ * MainActivity hosts the Arena.ai WebView and handles in-app authentication & deep links.
  *
- * OAuth flow (Google-compliant):
- * 1. User taps "Login with Google" inside WebView (arena.ai page).
- * 2. WebViewManager.shouldOverrideUrlLoading intercepts accounts.google.com / oauth2.googleapis.com
- *    and launches it in Chrome Custom Tab (CustomTabsIntent) — NOT WebView.
- *    Google blocks embedded WebView server-side; Custom Tabs use real Chrome UA.
- * 3. User authenticates in Custom Tab.
- * 4. Google redirects to arena.ai OAuth callback (e.g. https://arena.ai/auth/callback?code=...)
- *    That navigation hits an intent-filter with autoVerify=true in AndroidManifest.xml.
- *    Because MainActivity is singleTask, the system brings MainActivity to foreground
- *    and delivers the callback URL via onNewIntent().
- * 5. handleIntent() loads that callback URL in the WebView. The WebView makes its own
- *    request to arena.ai, server exchanges code for session and sets Set-Cookie session
- *    header in WebView's CookieManager store. This ensures authenticated session is
- *    visible to WebView even though Custom Tab and WebView do NOT share cookie jars.
- * 6. CookieManager.flush() persists the session.
- * 7. Custom Tab is left in background; user returning via back press will see it but
- *    can close or it may auto-close after App Link. We reload WebView explicitly.
- *
- * Cookie continuity verification:
- * - Custom Tabs use Chrome's cookie store, WebView uses WebView's CookieManager — separate.
- * - Our fix: final OAuth step is always a request to arena.ai done BY the WebView itself
- *   (via handleIntent loadUrl). So WebView gets its own session cookie directly.
- * - We also ensure flush() is called after every page finish and onPause/onDestroy.
- * - Manual testing still required on real device to confirm end-to-end login.
+ * In-App Login Architecture:
+ * 1. User taps "Login with Google", "GitHub", "Email", etc. inside WebView.
+ * 2. WebView User-Agent is formatted with genuine Chrome Mobile tokens (removing '; wv' and 'Version/X.X'),
+ *    ensuring Google OAuth does not block embedded WebView with '403 disallowed_useragent'.
+ * 3. Both redirect flows and popup window flows (window.open) are handled directly in-app with
+ *    shared CookieManager.
+ * 4. User completes authentication inside the app.
+ * 5. Session cookies and storage are saved directly into the app's CookieManager store.
+ * 6. User is immediately returned to Arena.ai inside the app with full logged-in state.
  */
 class MainActivity : AppCompatActivity(), WebViewManager.Listener {
 
@@ -79,7 +64,7 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
             }
         }
 
-        // Handle deep link intent (e.g., email verification or OAuth callback after Custom Tab)
+        // Handle deep link intent (e.g., email verification or direct link)
         handleIntent(intent)
 
         checkAndRequestPermissions()
@@ -89,45 +74,24 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
-        // Handle deep link when app is already running (e.g., OAuth callback returning from Custom Tab)
         intent?.let { handleIntent(it) }
     }
 
     /**
-     * Handle incoming intents — specifically App Links that target arena.ai URLs.
-     *
-     * This is critical for OAuth:
-     * - When Custom Tab navigates to https://arena.ai/auth/callback, the system
-     *   routes it here via the intent-filter with autoVerify=true.
-     * - We then load that URL in the WebView, so the WebView itself performs the
-     *   request and receives the session cookie via Set-Cookie. This solves the
-     *   cookie-sharing problem between Custom Tab (Chrome store) and WebView.
-     *
-     * - After loading, WebView's onPageFinished will flush cookies.
-     * - As extra safety, we also flush explicitly and ensure CookieManager is
-     *   accepting cookies.
+     * Handle incoming intents — specifically deep links / App Links for arena.ai.
      */
     private fun handleIntent(intent: Intent) {
         val uri = intent.data ?: return
-        if (uri.scheme !in listOf("http", "https")) return
+        val scheme = uri.scheme?.lowercase() ?: return
+        if (scheme !in listOf("http", "https")) return
 
-        val host = uri.host ?: return
-        // Only handle arena.ai URLs (exact match or subdomain)
-        if (host == "arena.ai" || host.endsWith(".arena.ai")) {
-            // Ensure CookieManager is ready to accept the session cookie
+        if (WebViewManager.isAllowedInWebView(uri)) {
             try {
                 val cm = CookieManager.getInstance()
                 cm.setAcceptCookie(true)
-                // The WebView instance may not exist yet during early launch,
-                // but getWebView ensures cookies are configured.
             } catch (_: Exception) {}
 
-            // Load the callback / deep link URL in WebView.
-            // This makes WebView perform the request itself, so session cookie lands in WebView's store.
             WebViewManager.loadUrl(uri.toString())
-
-            // Explicitly flush any existing cookies before loading new page to ensure clean state,
-            // and after, the flush will happen in onPageFinished as well.
             WebViewManager.flushCookies()
         }
     }
@@ -146,9 +110,6 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
     override fun onResume() {
         super.onResume()
         WebViewManager.onResume()
-        // When returning from Custom Tab, the WebView may have just been loaded
-        // with the OAuth callback. Ensure cookies are flushed and WebView is visible.
-        // No need to force reload here — handleIntent already loaded the URL.
     }
 
     private fun startArenaService() {
@@ -163,6 +124,9 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
     }
 
     override fun onBackPressed() {
+        if (WebViewManager.dismissActivePopup()) {
+            return
+        }
         if (WebViewManager.canGoBack()) {
             WebViewManager.goBack()
         } else {
