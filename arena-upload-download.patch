@@ -1,0 +1,219 @@
+diff --git a/app/src/main/java/com/federal/arenaai/MainActivity.kt b/app/src/main/java/com/federal/arenaai/MainActivity.kt
+index b28d82e..2308fe9 100644
+--- a/app/src/main/java/com/federal/arenaai/MainActivity.kt
++++ b/app/src/main/java/com/federal/arenaai/MainActivity.kt
+@@ -49,6 +49,9 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
+         // Register as WebViewManager listener for process-death recovery
+         WebViewManager.listener = this
+ 
++        // Wire the system file-picker launcher for <input type="file"> uploads
++        WebViewManager.startFileChooser = { intent -> fileChooserLauncher.launch(intent) }
++
+         // Attach WebView
+         val webView = WebViewManager.getWebView(this)
+         if (webView.parent != null) {
+@@ -161,6 +164,30 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
+         checkBatteryOptimization()
+     }
+ 
++    /**
++     * System file picker for <input type="file"> uploads. Launched by
++     * WebViewManager.onShowFileChooser(); the result is delivered back via
++     * WebViewManager.deliverFileChooserResult().
++     */
++    private val fileChooserLauncher = registerForActivityResult(
++        ActivityResultContracts.StartActivityForResult()
++    ) { result ->
++        val uris: Array<Uri>? = if (result.resultCode == RESULT_OK) {
++            val data = result.data
++            val clip = data?.clipData
++            when {
++                clip != null && clip.itemCount > 0 ->
++                    Array(clip.itemCount) { clip.getItemAt(it).uri }
++                data?.data != null -> arrayOf(data.data!!)
++                else -> null
++            }
++        } else {
++            // null is REQUIRED to release the JS callback when the user cancels.
++            null
++        }
++        WebViewManager.deliverFileChooserResult(uris)
++    }
++
+     private fun checkBatteryOptimization() {
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+             val prefs = getPreferences(Context.MODE_PRIVATE)
+@@ -201,6 +228,9 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
+ 
+     override fun onDestroy() {
+         super.onDestroy()
++        // Release any pending file-chooser callback so the next picker works.
++        WebViewManager.cancelPendingFileChooser()
++        WebViewManager.startFileChooser = null
+         // Detach without (re)creating the singleton WebView (getWebView() has that side effect).
+         WebViewManager.detachFrom(container)
+         WebViewManager.flushCookies()
+diff --git a/app/src/main/java/com/federal/arenaai/WebViewManager.kt b/app/src/main/java/com/federal/arenaai/WebViewManager.kt
+index 5aacc76..14b883b 100644
+--- a/app/src/main/java/com/federal/arenaai/WebViewManager.kt
++++ b/app/src/main/java/com/federal/arenaai/WebViewManager.kt
+@@ -3,6 +3,7 @@ package com.federal.arenaai
+ import android.annotation.SuppressLint
+ import android.app.Activity
+ import android.app.Dialog
++import android.app.DownloadManager
+ import android.content.Context
+ import android.content.ContextWrapper
+ import android.content.Intent
+@@ -11,9 +12,13 @@ import android.content.pm.PackageManager
+ import android.graphics.Bitmap
+ import android.net.Uri
+ import android.os.Build
++import android.os.Environment
+ import android.os.Message
+ import android.view.ViewGroup
+ import android.webkit.CookieManager
++import android.webkit.DownloadListener
++import android.webkit.URLUtil
++import android.webkit.ValueCallback
+ import android.webkit.WebChromeClient
+ import android.webkit.WebResourceError
+ import android.webkit.WebResourceRequest
+@@ -27,6 +32,19 @@ object WebViewManager {
+     private var currentUrl: String = "https://arena.ai"
+     private var activePopupDialog: Dialog? = null
+ 
++    /**
++     * Holds the pending <input type="file"> chooser callback. Must be invoked
++     * EXACTLY ONCE with the chosen Uris (or null if cancelled).
++     */
++    private var filePathCallback: ValueCallback<Array<Uri>>? = null
++
++    /**
++     * Bridge to the Activity's registerForActivityResult launcher. The Activity
++     * sets this so onShowFileChooser() can start the system picker and later
++     * deliver the result via [deliverFileChooserResult].
++     */
++    var startFileChooser: ((Intent) -> Unit)? = null
++
+     /**
+      * Listener for WebView lifecycle events that the Activity should handle.
+      */
+@@ -226,6 +244,12 @@ object WebViewManager {
+                 // Configure cookies BEFORE loading any page
+                 configureCookies(this)
+ 
++                // Handle file downloads (attachments, exported files, etc.) via the
++                // system DownloadManager, including the WebView's auth cookies.
++                setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
++                    handleDownload(url, userAgent, contentDisposition, mimetype)
++                }
++
+                 webViewClient = object : WebViewClient() {
+                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                         val uri = request?.url ?: return false
+@@ -350,6 +374,40 @@ object WebViewManager {
+                         super.onReceivedTitle(view, title)
+                     }
+ 
++                    /**
++                     * Handle <input type="file"> upload choosers. Launches the system
++                     * content/document picker (gallery + files) and delivers the chosen
++                     * Uris back to the page via [deliverFileChooserResult].
++                     */
++                    override fun onShowFileChooser(
++                        webView: WebView?,
++                        callback: ValueCallback<Array<Uri>>,
++                        params: WebChromeClient.FileChooserParams
++                    ): Boolean {
++                        // Release any previously pending callback before starting a new one.
++                        filePathCallback?.onReceiveValue(null)
++                        filePathCallback = callback
++
++                        val contentIntent = params.createIntent().apply {
++                            addCategory(Intent.CATEGORY_OPENABLE)
++                            if (params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
++                                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
++                            }
++                        }
++
++                        val launcher = startFileChooser ?: run {
++                            filePathCallback = null
++                            return false
++                        }
++                        return try {
++                            launcher.invoke(contentIntent)
++                            true
++                        } catch (e: Exception) {
++                            filePathCallback = null
++                            false
++                        }
++                    }
++
+                     /**
+                      * Handle OAuth popup windows (window.open).
+                      * Creates an in-app popup dialog with a secondary WebView that shares
+@@ -547,6 +605,63 @@ object WebViewManager {
+         } catch (_: Exception) {}
+     }
+ 
++    /**
++     * Called by the Activity with the result of the system file picker.
++     * Pass the chosen Uris, or null if the user cancelled (releases the callback).
++     */
++    fun deliverFileChooserResult(uris: Array<Uri>?) {
++        val cb = filePathCallback
++        filePathCallback = null
++        cb?.onReceiveValue(uris)
++    }
++
++    /** Cancel any in-flight file chooser (e.g. on Activity destroy). */
++    fun cancelPendingFileChooser() {
++        filePathCallback?.onReceiveValue(null)
++        filePathCallback = null
++    }
++
++    /**
++     * Enqueue a download via the system DownloadManager so files can be saved
++     * to the public Downloads folder. Authenticated downloads are handled by
++     * forwarding the WebView's cookies + User-Agent. Non-http(s) URLs (blob:/data:)
++     * are handed to the external browser since DownloadManager cannot fetch them.
++     */
++    private fun handleDownload(
++        url: String,
++        userAgent: String,
++        contentDisposition: String?,
++        mimetype: String?
++    ) {
++        val ctx = mutableContext?.baseContext ?: return
++
++        if (!URLUtil.isNetworkUrl(url)) {
++            try { openInExternalBrowser(ctx, Uri.parse(url)) } catch (_: Exception) {}
++            return
++        }
++
++        try {
++            val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
++            val request = DownloadManager.Request(Uri.parse(url)).apply {
++                setMimeType(mimetype ?: "")
++                setTitle(fileName)
++                setDescription("Downloading $fileName")
++                addRequestHeader("User-Agent", userAgent)
++                val cookies = CookieManager.getInstance().getCookie(url)
++                if (!cookies.isNullOrEmpty()) addRequestHeader("Cookie", cookies)
++                setNotificationVisibility(
++                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
++                )
++                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
++            }
++            val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager ?: return
++            dm.enqueue(request)
++        } catch (e: Exception) {
++            // Fallback: let the user's browser attempt the download.
++            try { openInExternalBrowser(ctx, Uri.parse(url)) } catch (_: Exception) {}
++        }
++    }
++
+     fun saveState(outState: android.os.Bundle) {
+         try {
+             webView?.saveState(outState)
