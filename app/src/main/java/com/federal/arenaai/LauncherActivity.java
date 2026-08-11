@@ -15,6 +15,7 @@
  */
 package com.federal.arenaai;
 
+import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.net.Uri;
 import android.os.Build;
@@ -40,6 +41,18 @@ public class LauncherActivity
         } else {
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         }
+    }
+
+    /**
+     * Reuse the existing TWA task when the launcher or an app link is opened again.
+     * Keeping this activity instance avoids recreating the Custom Tab and its page.
+     */
+    @Override
+    public void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        // Do not call finish(), recreate(), or start a new TWA here. The existing
+        // Custom Tab/WebView page owns the web state and remains in the task.
+        setIntent(intent);
     }
 
     @Override
