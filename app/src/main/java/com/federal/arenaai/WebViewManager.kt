@@ -46,9 +46,13 @@ object WebViewManager {
      */
     fun cleanUserAgent(rawUa: String): String {
         return rawUa
+            // Remove the '; wv' WebView marker that triggers OAuth '403 disallowed_useragent'.
             .replace("; wv", "")
-            .replace("; wv;", ";")
-            .replace(Regex("Version/[0-9]+\\.[0-9]+\\s*"), "")
+            // Remove the legacy 'Version/X.X' token that also flags embedded WebViews.
+            .replace(Regex("\\sVersion/[0-9]+\\.[0-9]+"), "")
+            // Collapse any whitespace artifacts left by the removals above.
+            .replace(Regex("\\s{2,}"), " ")
+            .trim()
     }
 
     /**
@@ -203,18 +207,20 @@ object WebViewManager {
                 settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
-                    databaseEnabled = true
-                    mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                     // Clean User-Agent so Google OAuth and other providers allow in-app login
                     userAgentString = cleanUserAgent(userAgentString)
-                    allowFileAccess = true
+                    // Security: never expose the local file system (app only loads remote https)
+                    allowFileAccess = false
+                    allowFileAccessFromFileURLs = false
+                    allowUniversalAccessFromFileURLs = false
                     builtInZoomControls = true
                     displayZoomControls = false
-                    mediaPlaybackRequiresUserGesture = false
+                    mediaPlaybackRequiresUserGesture = true
                     cacheMode = WebSettings.LOAD_DEFAULT
                     setSupportMultipleWindows(true)
                     javaScriptCanOpenWindowsAutomatically = true
-                    setGeolocationEnabled(true)
+                    setGeolocationEnabled(false)
                 }
 
                 // Configure cookies BEFORE loading any page
@@ -237,27 +243,31 @@ object WebViewManager {
                             return true
                         }
 
-                        // Handle android intent:// schemes
+                        // Handle android intent:// schemes (hardened against intent injection).
+                        // Strip the explicit component and selector so a malicious page cannot
+                        // launch arbitrary exported activities via component=/selector=, and only
+                        // start activities that declare a BROWSABLE category.
                         if (scheme == "intent") {
                             try {
-                                val intent = Intent.parseUri(uri.toString(), Intent.URI_INTENT_SCHEME)
-                                if (intent != null && ctx != null) {
-                                    val pm = ctx.packageManager
-                                    val info = pm.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
-                                    if (info != null) {
-                                        ctx.startActivity(intent)
-                                    } else {
-                                        val fallbackUrl = intent.getStringExtra("browser_fallback_url")
-                                        if (fallbackUrl != null) {
-                                            val fallbackUri = Uri.parse(fallbackUrl)
-                                            if (isAllowedInWebView(fallbackUri)) {
-                                                view?.loadUrl(fallbackUrl)
-                                            } else {
-                                                openInExternalBrowser(ctx, fallbackUri)
-                                            }
+                                val parsed = Intent.parseUri(uri.toString(), Intent.URI_INTENT_SCHEME)
+                                // Note: setSelector() returns void (the others return Intent),
+                                // so build the intent statement-by-statement instead of chaining.
+                                parsed.addCategory(Intent.CATEGORY_BROWSABLE)
+                                parsed.setComponent(null)
+                                parsed.setSelector(null)
+                                parsed.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                if (ctx != null && parsed.resolveActivity(ctx.packageManager) != null) {
+                                    ctx.startActivity(parsed)
+                                } else {
+                                    val fallbackUrl = parsed.getStringExtra("browser_fallback_url")
+                                    if (fallbackUrl != null) {
+                                        val fallbackUri = Uri.parse(fallbackUrl)
+                                        if (isAllowedInWebView(fallbackUri)) {
+                                            view?.loadUrl(fallbackUrl)
+                                        } else {
+                                            openInExternalBrowser(ctx, fallbackUri)
                                         }
                                     }
-                                    return true
                                 }
                             } catch (_: Exception) {}
                             return true
@@ -292,21 +302,21 @@ object WebViewManager {
 
                     override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                         super.onReceivedError(view, request, error)
-                        if (request?.isForMainFrame == true) {
-                            view?.loadData(
-                                """
-                                <html><body style="background:#1a1a2e;color:#fff;font-family:sans-serif;
-                                display:flex;flex-direction:column;align-items:center;justify-content:center;
-                                height:100vh;margin:0;padding:20px;box-sizing:border-box;">
-                                <h2>Connection Error</h2>
-                                <p>Unable to load the page. Please check your internet connection.</p>
-                                <p><a href="https://arena.ai" style="color:#4fc3f7;">Retry</a></p>
-                                </body></html>
-                                """.trimIndent(),
-                                "text/html",
-                                "UTF-8"
-                            )
-                        }
+                        if (request?.isForMainFrame != true) return
+                        val failedUrl = request.url?.toString() ?: currentUrl
+                        // Avoid recursing if we are already showing the error page.
+                        if (failedUrl.startsWith("about:")) return
+
+                        val html = """
+                            <html><body style="background:#1a1a2e;color:#fff;font-family:sans-serif;
+                            display:flex;flex-direction:column;align-items:center;justify-content:center;
+                            height:100vh;margin:0;padding:20px;box-sizing:border-box;">
+                            <h2>Connection Error</h2>
+                            <p>Unable to load the page. Please check your internet connection.</p>
+                            <p><a href="$failedUrl" style="color:#4fc3f7;">Retry</a></p>
+                            </body></html>
+                        """.trimIndent()
+                        view?.loadDataWithBaseURL("about:blank", html, "text/html", "UTF-8", failedUrl)
                     }
 
                     override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
@@ -367,10 +377,11 @@ object WebViewManager {
                             settings.apply {
                                 javaScriptEnabled = true
                                 domStorageEnabled = true
-                                databaseEnabled = true
-                                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                                 userAgentString = cleanUserAgent(userAgentString)
-                                allowFileAccess = true
+                                allowFileAccess = false
+                                allowFileAccessFromFileURLs = false
+                                allowUniversalAccessFromFileURLs = false
                                 setSupportMultipleWindows(true)
                                 javaScriptCanOpenWindowsAutomatically = true
                                 cacheMode = WebSettings.LOAD_DEFAULT
@@ -378,7 +389,10 @@ object WebViewManager {
                             configureCookies(this)
                         }
 
-                        val dialog = Dialog(activity, android.R.style.Theme_DeviceDefault_Light_NoActionBar_Fullscreen).apply {
+                        var popupTargetUrl: String? = null
+
+                        // DayNight-aware popup so it matches the app theme in dark mode.
+                        val dialog = Dialog(activity, R.style.Arena_PopupDialog).apply {
                             setContentView(popupWebView)
                             setCancelable(true)
                         }
@@ -423,21 +437,28 @@ object WebViewManager {
                                 super.onPageFinished(v, url)
                                 flushCookies()
 
-                                // If popup redirected back to arena.ai authenticated pages and finished,
-                                // dismiss popup and load the URL in the main WebView
+                                // If the popup redirected back to an authenticated arena.ai page,
+                                // remember where to land and dismiss. The dismiss listener performs
+                                // the single navigation into the main WebView (avoids a double load).
                                 url?.let {
                                     val u = Uri.parse(it)
                                     val host = u.host?.lowercase() ?: ""
                                     if (host == "arena.ai" || host.endsWith(".arena.ai") || host == "lmarena.ai" || host.endsWith(".lmarena.ai")) {
                                         val path = u.path ?: ""
                                         if (path == "/" || path.startsWith("/c/") || path.startsWith("/leaderboard")) {
+                                            popupTargetUrl = it
                                             try {
                                                 dialog.dismiss()
                                             } catch (_: Exception) {}
-                                            loadUrl(it)
                                         }
                                     }
                                 }
+                            }
+
+                            override fun onRenderProcessGone(v: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                                try { popupWebView.destroy() } catch (_: Exception) {}
+                                try { dialog.dismiss() } catch (_: Exception) {}
+                                return true
                             }
                         }
 
@@ -450,13 +471,15 @@ object WebViewManager {
                                 popupWebView.destroy()
                             } catch (_: Exception) {}
 
-                            // Reload main webView so authenticated session renders immediately
+                            // Single authoritative navigation: load the popup's target (or reload
+                            // the current page) into the main WebView so the session renders.
                             webView?.let { mainView ->
-                                val mainUrl = mainView.url ?: currentUrl
-                                if (mainUrl.contains("arena.ai") || mainUrl.contains("lmarena.ai")) {
-                                    mainView.reload()
+                                val dest = popupTargetUrl ?: mainView.url ?: currentUrl
+                                if (dest.contains("arena.ai") || dest.contains("lmarena.ai")) {
+                                    mainView.loadUrl(dest)
                                 }
                             }
+                            popupTargetUrl = null
                         }
 
                         dialog.show()
@@ -507,6 +530,21 @@ object WebViewManager {
 
     fun onResume() {
         webView?.onResume()
+    }
+
+    /**
+     * Detach the singleton WebView from a ViewGroup WITHOUT creating a new WebView.
+     * Use this from Activity.onDestroy instead of getWebView(), which has the side
+     * effect of (re)creating and loading a WebView when the singleton is null.
+     */
+    fun detachFrom(container: ViewGroup) {
+        try {
+            webView?.let { w ->
+                if (w.parent === container) {
+                    container.removeView(w)
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     fun saveState(outState: android.os.Bundle) {
