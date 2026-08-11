@@ -15,6 +15,7 @@
  */
 package com.federal.arenaai;
 
+import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.net.Uri;
 import android.os.Build;
@@ -40,6 +41,15 @@ public class LauncherActivity
         } else {
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        // singleTask reuse: keep existing TWA / Custom Tab session in memory.
+        // Just update the Intent reference; do NOT recreate or reload the page.
+        // This ensures resume/relaunch retains chat state and avoids fresh load.
+        setIntent(intent);
     }
 
     @Override
