@@ -11,15 +11,15 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- Required for Android 11+ package visibility: query browsers supporting Custom Tabs.
-         Without this, CustomTabsIntent may fail to resolve the Custom Tabs service on API 30+. -->
+    <!-- Package visibility for external links and browser intents -->
     <queries>
-        <intent>
-            <action android:name="android.support.customtabs.action.CustomTabsService" />
-        </intent>
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="http" />
         </intent>
     </queries>
 
@@ -45,18 +45,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- App Links / Deep Links for arena.ai.
-                 Catches email verification links and OAuth callback redirects.
-                 autoVerify="true" makes this an App Link (Android 6+): the system
-                 opens the app directly without a chooser if arena.ai serves a valid
-                 /.well-known/assetlinks.json matching our signing key.
-                 If verification fails, the app still appears in the "Open with" chooser. -->
+            <!-- App Links / Deep Links for arena.ai and lmarena.ai -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="https" android:host="arena.ai" />
                 <data android:scheme="https" android:host="www.arena.ai" />
+                <data android:scheme="https" android:host="lmarena.ai" />
+                <data android:scheme="https" android:host="www.lmarena.ai" />
             </intent-filter>
 
         </activity>
