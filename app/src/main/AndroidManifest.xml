@@ -14,181 +14,78 @@
      limitations under the License.
 -->
 
-<!-- The "package" attribute is rewritten by the Gradle build with the value of applicationId.
-     It is still required here, as it is used to derive paths, for instance when referring
-     to an Activity by ".MyActivity" instead of the full name. If more Activities are added to the
-     application, the package attribute will need to reflect the correct path in order to use
-     the abbreviated format. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.federal.arenaai">
 
-    
+    <!-- Standard internet/network-state access to load https://arena.ai and detect
+         connectivity for the in-app error/retry screen. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    
+    <!-- Required to run a Foreground Service at all (all target SDKs). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
-    
+    <!-- Android 14+ (API 34) requires every foreground service to declare a specific
+         type. ArenaSessionService does not fit any of the predefined categories (it is not
+         media, location, camera, etc.) — it exists purely to keep this app's process /
+         WebView session alive while the user has chosen to keep Arena AI running in the
+         background, which is exactly the documented use case for "specialUse". -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
-    
+    <!-- Android 13+ (API 33) requires runtime permission to post the ongoing
+         "Arena AI is running" notification that the foreground service depends on. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Used only to launch the system "ignore battery optimizations" settings screen from
+         an explicit, user-initiated dialog (see BatteryOptimizationHelper). This does not
+         grant the exemption automatically — the user must approve it in Settings. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
-        android:name="Application"
+        android:name=".ArenaApplication"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/appName"
-        
-        android:manageSpaceActivity="com.google.androidbrowserhelper.trusted.ManageDataLauncherActivity"
-        
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Translucent.NoTitleBar">
+        android:theme="@style/Theme.ArenaAi">
 
-        <meta-data
-            android:name="asset_statements"
-            android:resource="@string/assetStatements" />
-
-        
-            <meta-data
-                android:name="web_manifest_url"
-                android:value="@string/webManifestUrl" />
-        
-
-        <meta-data
-            android:name="twa_generator"
-            android:value="@string/generatorApp" />
-
-        
-
-        
-
-        
-            <activity android:name="com.google.androidbrowserhelper.trusted.ManageDataLauncherActivity"
-                android:exported="false"
-                android:enabled="true"
-                android:excludeFromRecents="true">
-                <meta-data
-                    android:name="android.support.customtabs.trusted.MANAGE_SPACE_URL"
-                    android:value="@string/launchUrl" />
-                <intent-filter>
-                    <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
-                    <category android:name="android.intent.category.DEFAULT" />
-                </intent-filter>
-            </activity>
-        
-
-        <activity android:name="LauncherActivity"
-            android:alwaysRetainTaskState="true"
+        <activity android:name=".MainActivity"
+            android:exported="true"
             android:launchMode="singleTask"
-            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode"
             android:label="@string/launcherName"
-            android:exported="true">
-            <meta-data android:name="android.support.customtabs.trusted.DEFAULT_URL"
-                android:value="@string/launchUrl" />
-
-            <meta-data
-                android:name="android.support.customtabs.trusted.STATUS_BAR_COLOR"
-                android:resource="@color/colorPrimary" />
-
-            
-
-            <meta-data
-                android:name="android.support.customtabs.trusted.STATUS_BAR_COLOR_DARK"
-                android:resource="@color/colorPrimaryDark" />
-
-            <meta-data
-                android:name="android.support.customtabs.trusted.NAVIGATION_BAR_COLOR"
-                android:resource="@color/navigationColor" />
-
-            <meta-data
-                android:name="android.support.customtabs.trusted.NAVIGATION_BAR_COLOR_DARK"
-                android:resource="@color/navigationColorDark" />
-
-            <meta-data
-                android:name="androix.browser.trusted.NAVIGATION_BAR_DIVIDER_COLOR"
-                android:resource="@color/navigationDividerColor" />
-
-            <meta-data
-                android:name="androix.browser.trusted.NAVIGATION_BAR_DIVIDER_COLOR_DARK"
-                android:resource="@color/navigationDividerColorDark" />
-
-            <meta-data android:name="android.support.customtabs.trusted.SPLASH_IMAGE_DRAWABLE"
-                android:resource="@drawable/splash"/>
-
-            <meta-data android:name="android.support.customtabs.trusted.SPLASH_SCREEN_BACKGROUND_COLOR"
-                android:resource="@color/backgroundColor"/>
-
-            <meta-data android:name="android.support.customtabs.trusted.SPLASH_SCREEN_FADE_OUT_DURATION"
-                android:value="@integer/splashScreenFadeOutDuration"/>
-
-            <meta-data android:name="android.support.customtabs.trusted.FILE_PROVIDER_AUTHORITY"
-                android:value="@string/providerAuthority"/>
-
-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
-
-            <meta-data android:name="android.support.customtabs.trusted.FALLBACK_STRATEGY"
-                android:value="@string/fallbackType" />
-
-            
-
-            
-
-            <meta-data android:name="android.support.customtabs.trusted.SCREEN_ORIENTATION"
-                android:value="@string/orientation"/>
-
-            
-
-            
-
-            
+            android:theme="@style/Theme.ArenaAi.Launch"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode|density"
+            android:windowSoftInputMode="adjustResize">
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- Deep links to arena.ai (e.g. tapping a shared link) reopen this task instead
+                 of the system browser. External domains are never matched here; MainActivity /
+                 ArenaWebViewClient additionally guards navigation so only the arena.ai host is
+                 ever loaded inside the WebView. -->
             <intent-filter android:autoVerify="true">
-                <action android:name="android.intent.action.VIEW"/>
+                <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="https"
-                    android:host="@string/hostName"
-                
-                />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="@string/hostName" />
             </intent-filter>
-
-            
-
-            
         </activity>
 
-        <activity android:name="com.google.androidbrowserhelper.trusted.FocusActivity" />
-
-        <activity android:name="com.google.androidbrowserhelper.trusted.WebViewFallbackActivity"
-            android:configChanges="orientation|screenSize" />
-
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="@string/providerAuthority"
-            android:grantUriPermissions="true"
-            android:exported="false">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/filepaths" />
-        </provider>
-
+        <!-- Foreground Service that owns the "keep the session alive" lifecycle. It is
+             started explicitly from MainActivity and only stopped by explicit user action
+             (notification action, or the in-app "Close" menu item) — never merely because the
+             Activity was backgrounded. See ArenaSessionService for details and honest limits. -->
         <service
-            android:name=".DelegationService"
-            android:enabled="@bool/enableNotification"
-            android:exported="@bool/enableNotification">
-
-            
-
-            <intent-filter>
-                <action android:name="android.support.customtabs.trusted.TRUSTED_WEB_ACTIVITY_SERVICE"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-            </intent-filter>
+            android:name=".ArenaSessionService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the user's arena.ai WebView session (chat state, login, in-flight page) alive in memory while the app is backgrounded, until the user explicitly closes it." />
         </service>
-
-        
-
-        
     </application>
 </manifest>

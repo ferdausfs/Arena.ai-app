@@ -1,3 +1,7 @@
+# Builds the native WebView + Foreground Service Android app (see README.md for the
+# architecture). No Bubblewrap/TWA-specific tooling is required for this build — it's a plain
+# Gradle Android project — so this pipeline is unchanged in shape from a standard Android CI
+# workflow: checkout -> JDK 17 -> Android SDK -> assembleRelease -> upload artifact -> tag release.
 name: Build Android APK
 
 on:

@@ -1,5 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
 <!--
-    Copyright 2019 Google Inc. All Rights Reserved.
+    Copyright 2024 Arena AI
 
      Licensed under the Apache License, Version 2.0 (the "License");
      you may not use this file except in compliance with the License.
@@ -13,4 +14,17 @@
      See the License for the specific language governing permissions and
      limitations under the License.
 -->
-<shortcuts xmlns:android='http://schemas.android.com/apk/res/android' />
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/action_reload"
+        android:title="@string/menu_reload"
+        android:showAsAction="never" />
+    <item
+        android:id="@+id/action_battery"
+        android:title="@string/menu_battery"
+        android:showAsAction="never" />
+    <item
+        android:id="@+id/action_close_session"
+        android:title="@string/menu_close_session"
+        android:showAsAction="never" />
+</menu>
