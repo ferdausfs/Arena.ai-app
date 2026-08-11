@@ -654,5 +654,11 @@ The following were implemented (see `git diff`):
 - **#14** DayNight popup dialog style
 - **#17** UA cleaning simplified
 - **#19** `app/proguard-rules.pro` created
+- **#12** `allowBackup=false` (session cookies no longer back up/exfiltrable)
+- **#15** migrated deprecated `onBackPressed()` → `OnBackPressedDispatcher` (predictive-back ready)
 
-Documented as follow-ups (require product/build decisions): **#12** `allowBackup=false`, **#15** back-press dispatcher migration, **#16** certificate pinning, **#20** CI SDK alignment, `minifyEnabled`.
+Documented as follow-ups (require product/build decisions or permissions):
+
+- **#20 CI SDK alignment** — not applied in this PR because the sandbox's GitHub token lacks `workflows` permission (push of any `.github/workflows/*` change is rejected). Apply manually — in `.github/workflows/build-apk.yml` change `"platforms;android-36"` → `"platforms;android-34"` and `"build-tools;36.0.0"` → `"build-tools;34.0.0"` so the runner matches `compileSdk 34`. (The build passes either way; this is a consistency fix.)
+- **#16 certificate pinning** — note: Android WebView does not honor Network Security Config `<pin-set>`, so real pinning needs a custom `WebViewClient` chain validation — left as a design decision.
+- **`minifyEnabled`** — off by default; `proguard-rules.pro` is in place for when it's turned on.

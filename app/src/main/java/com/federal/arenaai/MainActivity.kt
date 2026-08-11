@@ -13,6 +13,7 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.widget.FrameLayout
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -69,6 +70,9 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
 
         checkAndRequestPermissions()
         startArenaService()
+
+        // Modern predictive-back handling (onBackPressed() is deprecated from API 33+).
+        registerBackHandling()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -123,15 +127,20 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
         }
     }
 
-    override fun onBackPressed() {
-        if (WebViewManager.dismissActivePopup()) {
-            return
-        }
-        if (WebViewManager.canGoBack()) {
-            WebViewManager.goBack()
-        } else {
-            moveTaskToBack(true)
-        }
+    private fun registerBackHandling() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                // 1. Close an OAuth popup if one is open.
+                if (WebViewManager.dismissActivePopup()) return
+                // 2. Navigate WebView history back.
+                if (WebViewManager.canGoBack()) {
+                    WebViewManager.goBack()
+                } else {
+                    // 3. No more history -> minimize the app (keep the foreground service alive).
+                    moveTaskToBack(true)
+                }
+            }
+        })
     }
 
     private fun checkAndRequestPermissions() {
