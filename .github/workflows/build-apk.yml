@@ -32,8 +32,8 @@ jobs:
         shell: bash
         run: |
           sdkmanager --install "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
             >/dev/null 2>&1 || true
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
 

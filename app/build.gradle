@@ -73,7 +73,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    compileSdkVersion 35
+    compileSdkVersion 36
     namespace "com.federal.arenaai"
 
     signingConfigs {
@@ -89,7 +89,7 @@ android {
     defaultConfig {
         applicationId "com.federal.arenaai"
         minSdkVersion 21
-        targetSdkVersion 35
+        targetSdkVersion 36
         versionCode 1
         versionName "1.0.0"
 
