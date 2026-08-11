@@ -30,25 +30,31 @@ class ArenaSessionService : Service() {
         if (intent?.action == ACTION_STOP) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
-            
-            // Exit the process so the user gets a fresh start next time
-            // since they explicitly closed it.
+
+            // Flush cookies before exiting so session is saved for next launch
+            WebViewManager.flushCookies()
+
+            // Exit the process. The user explicitly closed the app via the
+            // notification action, so a clean process exit is appropriate.
+            // This also destroys the WebView singleton and all session state.
             kotlin.system.exitProcess(0)
             return START_NOT_STICKY
         }
 
         val notification = createNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            var type = 0
-            if (Build.VERSION.SDK_INT >= 34) {
-                // FOREGROUND_SERVICE_TYPE_SPECIAL_USE = 1073741824
-                type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            val type = if (Build.VERSION.SDK_INT >= 34) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
             }
             startForeground(NOTIFICATION_ID, notification, type)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
 
+        // START_STICKY ensures the system restarts the service if it's killed,
+        // which keeps the process alive and the WebView in memory.
         return START_STICKY
     }
 
@@ -72,7 +78,7 @@ class ArenaSessionService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Arena AI is running")
             .setContentText("Keeping your session active in the background.")
-            .setSmallIcon(R.mipmap.ic_launcher) // Use app icon or standard notification icon
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(openPendingIntent)
             .addAction(0, "Close", stopPendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
