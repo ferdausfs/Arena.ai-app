@@ -192,12 +192,8 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
 
     override fun onDestroy() {
         super.onDestroy()
-        try {
-            val webView = WebViewManager.getWebView(this)
-            if (webView.parent === container) {
-                container.removeView(webView)
-            }
-        } catch (_: Exception) {}
+        // Detach without (re)creating the singleton WebView (getWebView() has that side effect).
+        WebViewManager.detachFrom(container)
         WebViewManager.flushCookies()
         if (WebViewManager.listener === this) {
             WebViewManager.listener = null

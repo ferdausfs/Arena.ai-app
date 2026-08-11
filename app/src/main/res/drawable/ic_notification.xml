@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Monochrome notification icon. Android renders the small notification icon as a
+  white-on-transparent silhouette, so this MUST be a single-color vector (not a
+  full-color launcher mipmap). Using a color icon produces a white blob.
+  Drawn as a simple "A" glyph for Arena AI.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,2 L2,22 L6.5,22 L8.6,17.4 L15.4,17.4 L17.5,22 L22,22 Z M12,9.2 L13.9,13.6 L10.1,13.6 Z" />
+</vector>

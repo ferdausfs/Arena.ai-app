@@ -28,16 +28,16 @@ class ArenaSessionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            // Flush cookies first so the session is saved, then tear down cleanly.
+            WebViewManager.flushCookies()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
 
-            // Flush cookies before exiting so session is saved for next launch
-            WebViewManager.flushCookies()
-
-            // Exit the process. The user explicitly closed the app via the
-            // notification action, so a clean process exit is appropriate.
-            // This also destroys the WebView singleton and all session state.
+            // The user explicitly closed the app via the notification action, so a clean
+            // process exit is appropriate. This destroys the WebView singleton and all
+            // session state. (The explicit return below is intentional and reachable.)
             kotlin.system.exitProcess(0)
+            @Suppress("UNREACHABLE_CODE")
             return START_NOT_STICKY
         }
 
@@ -78,7 +78,7 @@ class ArenaSessionService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Arena AI is running")
             .setContentText("Keeping your session active in the background.")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(openPendingIntent)
             .addAction(0, "Close", stopPendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
