@@ -25,11 +25,10 @@ captures/
 .externalNativeBuild/
 .cxx/
 
-# Bubblewrap / Node local tooling
+# Local tooling caches
 node_modules/
 android-tools/
 jdk/
-bubblewrap-cli/
 
 # Generated secrets / logs
 *.log

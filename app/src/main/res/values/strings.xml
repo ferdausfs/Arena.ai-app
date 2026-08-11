@@ -1,42 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-    Copyright 2021 Google Inc. All Rights Reserved.
-
-     Licensed under the Apache License, Version 2.0 (the "License");
-     you may not use this file except in compliance with the License.
-     You may obtain a copy of the License at
-
-         http://www.apache.org/licenses/LICENSE-2.0
-
-     Unless required by applicable law or agreed to in writing, software
-     distributed under the License is distributed on an "AS IS" BASIS,
-     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-     See the License for the specific language governing permissions and
-     limitations under the License.
--->
 <resources>
-  
-
-  <!--
-    The "fullscreen" and "fullscreen-sticky" TWA manifest values correspond to "immersive" and "sticky-immersive"
-    AndroidManifest values.
-  -->
-  
-
-  <!--
-    This variable below expresses the relationship between the app and the site,
-    as documented in the TWA documentation at
-    https://developers.google.com/web/updates/2017/10/using-twa#set_up_digital_asset_links_in_an_android_app
-    and is injected into the AndroidManifest.xml
-  -->
-  <string name="assetStatements">
-    [{
-        \"relation\": [\"delegate_permission/common.handle_all_urls\"],
-        \"target\": {
-            \"namespace\": \"web\",
-            \"site\": \"https://arena.ai\"
-        }
-    }]
-    
-  </string>  
+    <string name="app_name">Arena AI</string>
+    <string name="arena_url">https://arena.ai/</string>
+    <string name="notification_channel_name">Arena AI session</string>
+    <string name="notification_channel_description">Keeps the Arena AI WebView session running in the background.</string>
+    <string name="notification_title">Arena AI is running</string>
+    <string name="notification_text">Your Arena AI session is kept alive in the background.</string>
+    <string name="notification_stop">Stop</string>
+    <string name="battery_dialog_title">Allow background session</string>
+    <string name="battery_dialog_message">To keep Arena AI alive after you leave the app or turn the screen off, allow this app to ignore battery optimization. Some devices may still restrict background work unless you disable battery optimization manually.</string>
+    <string name="battery_dialog_open_settings">Open settings</string>
+    <string name="battery_dialog_later">Not now</string>
+    <string name="error_title">Arena AI could not load</string>
+    <string name="error_message">Check your connection, then reload.</string>
+    <string name="action_reload">Reload</string>
+    <string name="action_open_browser">Open in browser</string>
+    <string name="action_close_session">Close session</string>
 </resources>
