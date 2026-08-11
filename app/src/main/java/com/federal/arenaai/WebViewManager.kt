@@ -300,6 +300,7 @@ object WebViewManager {
      */
     fun restoreState(savedInstanceState: android.os.Bundle): Boolean {
         val restored = webView?.restoreState(savedInstanceState)
-        return restored != null && restored.size() > 0
+        // WebBackForwardList exposes its size as a property (Java getSize()), not a function.
+        return restored != null && restored.size > 0
     }
 }
