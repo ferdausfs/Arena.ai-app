@@ -1,6 +1,5 @@
 package com.federal.arenaai
 
-import android.annotation.SuppressLint
 import android.app.DownloadManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -28,12 +27,8 @@ import android.widget.Toast
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
-import androidx.webkit.WebViewCompat
-import androidx.webkit.WebViewFeature
 import org.json.JSONObject
 import java.io.File
-import java.util.Collections
-import java.util.WeakHashMap
 import java.util.concurrent.Executors
 
 /**
@@ -52,20 +47,6 @@ object FileTransferSupport {
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var hookJs: String? = null
     private var notificationSerial = 0
-    private val documentStartInstalled =
-        Collections.newSetFromMap(WeakHashMap<WebView, Boolean>())
-
-    /** Only inject the download hook on Arena origins — never on OAuth hosts. */
-    private val hookOrigins = setOf(
-        "https://arena.ai",
-        "https://*.arena.ai",
-        "https://lmarena.ai",
-        "https://*.lmarena.ai",
-        "https://lmsys.org",
-        "https://*.lmsys.org",
-        "https://chatbot-arena.org",
-        "https://*.chatbot-arena.org"
-    )
 
     fun providerAuthority(context: Context): String =
         context.packageName + FILE_PROVIDER_AUTHORITY_SUFFIX
@@ -237,27 +218,6 @@ object FileTransferSupport {
                 }
         } catch (_: Exception) {
             null
-        }
-    }
-
-    /**
-     * Install the hook so it runs at document-start on Arena origins (catches
-     * `URL.createObjectURL` before page JS). Falls back to evaluateJavascript
-     * on every page finish for WebViews that lack DOCUMENT_START_SCRIPT.
-     */
-    fun installDocumentStartHook(webView: WebView) {
-        if (documentStartInstalled.contains(webView)) return
-        val js = hookJavaScript(webView.context) ?: return
-        try {
-            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                WebViewCompat.addDocumentStartJavaScript(webView, js, hookOrigins)
-                documentStartInstalled.add(webView)
-                Log.d(TAG, "document-start hook installed on ${webView.hashCode()}")
-            } else {
-                Log.d(TAG, "DOCUMENT_START_SCRIPT unsupported; will evaluate on page finish")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "addDocumentStartJavaScript failed", e)
         }
     }
 

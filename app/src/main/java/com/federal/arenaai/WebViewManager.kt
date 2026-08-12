@@ -258,7 +258,6 @@ object WebViewManager {
             target.removeJavascriptInterface(ArenaNativeBridge.JS_NAME)
         } catch (_: Exception) {}
         target.addJavascriptInterface(ArenaNativeBridge(), ArenaNativeBridge.JS_NAME)
-        FileTransferSupport.installDocumentStartHook(target)
         target.setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
             Log.d(
                 TAG,
@@ -372,9 +371,10 @@ object WebViewManager {
 
                     override fun onShowFileChooser(
                         webView: WebView?,
-                        callback: ValueCallback<Array<Uri>>,
-                        params: FileChooserParams
+                        callback: ValueCallback<Array<Uri>>?,
+                        params: FileChooserParams?
                     ): Boolean {
+                        if (callback == null || params == null) return false
                         return showFileChooser(webView, callback, params)
                     }
 
