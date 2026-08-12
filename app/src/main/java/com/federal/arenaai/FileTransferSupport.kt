@@ -114,13 +114,39 @@ object FileTransferSupport {
             return ChooserLaunch(camera.intent, camera.outputUri)
         }
 
+        // "All files" escape hatch. Sites like arena.ai restrict the input to a
+        // fixed accept list (no .zip), which makes the system picker grey out
+        // every other file type. Offer an unfiltered picker so the user can still
+        // select e.g. a .zip; the SITE's own validation then decides whether to
+        // accept it (the app must not bypass that). Only added when the page's
+        // accept list actually restricts types.
+        val allFilesIntent: Intent? =
+            if (acceptTypes.isNotEmpty() && acceptTypes.none { it.equals("*/*", ignoreCase = true) }) {
+                Intent(Intent.ACTION_GET_CONTENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    if (params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+                        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    }
+                }
+            } else {
+                null
+            }
+        if (allFilesIntent != null) {
+            Log.d(TAG, "offering 'All files' picker (accept restricted to $acceptTypes)")
+        }
+
         val chooser = Intent.createChooser(
             contentIntent,
             context.getString(R.string.file_chooser_title)
         ).apply {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            if (camera != null) {
-                putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(camera.intent))
+            val initial = mutableListOf<Intent>()
+            camera?.let { initial.add(it.intent) }
+            allFilesIntent?.let { initial.add(it) }
+            if (initial.isNotEmpty()) {
+                putExtra(Intent.EXTRA_INITIAL_INTENTS, initial.toTypedArray())
             }
         }
         return ChooserLaunch(chooser, camera?.outputUri)

@@ -31,6 +31,13 @@ Cannot attach `chrome://inspect` or `adb logcat` to a device from this environme
 - Tap the **+** icon in the chat composer, *or* paste a file.
 - Battle mode accepts PNG / JPEG / WebP / PDF.
 - Agent mode also accepts GIF, txt, md, csv, html, xml, css, js, json.
+- **`.zip` is not in either list** — that is arena.ai's own restriction, not a
+  WebView limitation (Chrome applies the same `accept` filter and greys out
+  zips). The app adds an **"All files"** picker action when the page restricts
+  `accept`, so any file (e.g. `.zip`) can still be selected; arena.ai's own
+  validation then decides whether to accept it. Practical workaround: extract
+  the zip and upload the files individually — Agent Mode accepts txt/md/js/json/
+  csv/html/xml/css.
 
 The user confirmed the same tap in **Chrome** opens Android’s “choose an action” sheet. That is the `<input type="file">` path (`WebChromeClient.onShowFileChooser`). It is **not** `window.showOpenFilePicker()` — that API is not implemented on Chrome Android, so it cannot be what Chrome is showing.
 
