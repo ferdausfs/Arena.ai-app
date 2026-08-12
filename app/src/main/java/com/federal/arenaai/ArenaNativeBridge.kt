@@ -52,7 +52,7 @@ class ArenaNativeBridge {
         if (id.isNullOrBlank()) return
         val ctx = FileTransferSupport.appContext() ?: return
         drop(id)
-        return try {
+        try {
             val dir = File(ctx.cacheDir, "blob-in").apply { mkdirs() }
             val file = File(dir, "blob_${id.filter { it.isLetterOrDigit() || it == '_' }}.bin")
             val out = FileOutputStream(file)
