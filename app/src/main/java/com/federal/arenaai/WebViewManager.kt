@@ -68,6 +68,31 @@ object WebViewManager {
     private val ioExecutor = Executors.newSingleThreadExecutor()
 
     /**
+     * Background CPU governor.
+     *
+     * The WebView renderer keeps animating and running JS timers as long as it
+     * is not paused. If the app stays hidden (screen off / switched away) that
+     * burns CPU/GPU continuously — on low-RAM phones the whole device slows
+     * down ("the 5 MB app freezes my phone"). Pausing the WebView stops
+     * rendering and JS timers; the network connection itself stays open and the
+     * session survives in cookies, so returning is instant.
+     *
+     * Pausing is DELAYED (45 s) so quick app switches and system pickers never
+     * pause the page, and the session/streams stay live.
+     */
+    private val lifecycleHandler = Handler(Looper.getMainLooper())
+    private val pauseRunnable = Runnable {
+        if (webViewPaused) return@Runnable
+        webViewPaused = true
+        try { webView?.onPause() } catch (_: Exception) {}
+        try { webView?.pauseTimers() } catch (_: Exception) {}
+        Log.d(TAG, "WebView paused (hidden > $PAUSE_AFTER_BACKGROUND_MS ms)")
+    }
+    private var webViewPaused = false
+
+    private const val PAUSE_AFTER_BACKGROUND_MS = 45_000L
+
+    /**
      * Listener for WebView lifecycle events that the Activity should handle.
      */
     interface Listener {
@@ -180,12 +205,16 @@ object WebViewManager {
 
     /**
      * Flush cookies to persistent storage so they survive app restarts and process kills.
+     * Runs on the IO executor: flush() can do disk I/O, and this is called from
+     * onPageFinished / onPause (UI thread) — blocking there janks rendering.
      */
     fun flushCookies() {
-        try {
-            CookieManager.getInstance().flush()
-        } catch (_: Exception) {
-            // CookieManager may not be initialized yet
+        ioExecutor.execute {
+            try {
+                CookieManager.getInstance().flush()
+            } catch (_: Exception) {
+                // CookieManager may not be initialized yet
+            }
         }
     }
 
@@ -379,8 +408,14 @@ object WebViewManager {
                 }
 
                 webChromeClient = object : WebChromeClient() {
+                    // SPA pages (arena.ai is React) can emit hundreds of console
+                    // messages; formatting strings for each on the UI thread
+                    // janks the app. Always log errors/warnings, cap the rest.
+                    private var consoleSpamCount = 0
+
                     override fun onProgressChanged(view: WebView?, newProgress: Int) {
                         super.onProgressChanged(view, newProgress)
+                        if (newProgress < 10) consoleSpamCount = 0
                         if (newProgress >= 100) {
                             FileTransferSupport.injectDownloadHook(view)
                         }
@@ -391,12 +426,18 @@ object WebViewManager {
                     }
 
                     override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
-                        Log.d(
-                            TAG,
-                            "console.${consoleMessage.messageLevel()} " +
-                                "${consoleMessage.sourceId()}:${consoleMessage.lineNumber()} " +
-                                consoleMessage.message()
-                        )
+                        val level = consoleMessage.messageLevel()
+                        val verbose = level == ConsoleMessage.MessageLevel.LOG ||
+                            level == ConsoleMessage.MessageLevel.DEBUG
+                        if (!verbose || consoleSpamCount < 30) {
+                            if (verbose) consoleSpamCount++
+                            Log.d(
+                                TAG,
+                                "console.${level} " +
+                                    "${consoleMessage.sourceId()}:${consoleMessage.lineNumber()} " +
+                                    consoleMessage.message()
+                            )
+                        }
                         return super.onConsoleMessage(consoleMessage)
                     }
 
@@ -449,6 +490,8 @@ object WebViewManager {
                         activePopupDialog = dialog
 
                         popupWebView.webChromeClient = object : WebChromeClient() {
+                            private var consoleSpamCount = 0
+
                             override fun onCloseWindow(window: WebView?) {
                                 super.onCloseWindow(window)
                                 try {
@@ -458,17 +501,24 @@ object WebViewManager {
 
                             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                                 super.onProgressChanged(view, newProgress)
+                                if (newProgress < 10) consoleSpamCount = 0
                                 if (newProgress >= 100) {
                                     FileTransferSupport.injectDownloadHook(view)
                                 }
                             }
 
                             override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
-                                Log.d(
-                                    TAG,
-                                    "popup.console.${consoleMessage.messageLevel()} " +
-                                        consoleMessage.message()
-                                )
+                                val level = consoleMessage.messageLevel()
+                                val verbose = level == ConsoleMessage.MessageLevel.LOG ||
+                                    level == ConsoleMessage.MessageLevel.DEBUG
+                                if (!verbose || consoleSpamCount < 30) {
+                                    if (verbose) consoleSpamCount++
+                                    Log.d(
+                                        TAG,
+                                        "popup.console.${level} " +
+                                            consoleMessage.message()
+                                    )
+                                }
                                 return super.onConsoleMessage(consoleMessage)
                             }
 
@@ -567,6 +617,19 @@ object WebViewManager {
                     WebView.setWebContentsDebuggingEnabled(
                         (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
                     )
+                }
+
+                // Keep the renderer process important (API 26+). Under memory
+                // pressure the system otherwise OOM-kills the renderer while a
+                // big workspace/chat is open, forcing a full reload — the
+                // "app freezes / reloads mid-work" symptom on low-RAM phones.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    try {
+                        WebView.setRendererPriorityPolicy(
+                            WebView.RENDERER_PRIORITY_IMPORTANT,
+                            false
+                        )
+                    } catch (_: Exception) {}
                 }
 
                 loadUrl(currentUrl)
@@ -951,6 +1014,26 @@ object WebViewManager {
     fun onResume() {
         // Intentionally empty (see onPause). Keeping the WebView un-paused is
         // what keeps the session/streams alive across backgrounding.
+    }
+
+    /**
+     * App fully hidden (onStop): schedule the delayed background pause so the
+     * renderer stops burning CPU once the app has been away for a while.
+     */
+    fun onBackgrounded() {
+        lifecycleHandler.removeCallbacks(pauseRunnable)
+        lifecycleHandler.postDelayed(pauseRunnable, PAUSE_AFTER_BACKGROUND_MS)
+    }
+
+    /** App visible again (onStart): cancel any pending pause, resume if paused. */
+    fun onForegrounded() {
+        lifecycleHandler.removeCallbacks(pauseRunnable)
+        if (webViewPaused) {
+            webViewPaused = false
+            try { webView?.resumeTimers() } catch (_: Exception) {}
+            try { webView?.onResume() } catch (_: Exception) {}
+            Log.d(TAG, "WebView resumed (foreground)")
+        }
     }
 
     /**

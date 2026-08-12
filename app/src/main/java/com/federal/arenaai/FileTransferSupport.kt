@@ -47,6 +47,7 @@ object FileTransferSupport {
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var hookJs: String? = null
     private var notificationSerial = 0
+    @Volatile private var lastCachePruneMs = 0L
 
     fun providerAuthority(context: Context): String =
         context.packageName + FILE_PROVIDER_AUTHORITY_SUFFIX
@@ -212,7 +213,34 @@ object FileTransferSupport {
         }
     }
 
+    /**
+     * Delete stale files from the upload/camera/blob staging dirs (at most once
+     * per hour). Without this the cache would grow forever with every upload
+     * and camera capture, eventually filling storage and slowing the phone.
+     */
+    private fun pruneStagingCache(context: Context) {
+        val now = System.currentTimeMillis()
+        if (now - lastCachePruneMs < 60L * 60L * 1000L) return
+        lastCachePruneMs = now
+        io.execute {
+            try {
+                val cutoff = now - 7L * 24L * 60L * 60L * 1000L
+                for (dirName in listOf("uploads", "camera", "blob-in")) {
+                    val dir = File(context.cacheDir, dirName)
+                    if (!dir.isDirectory) continue
+                    dir.listFiles()?.forEach { f ->
+                        if (f.isFile && f.lastModified() < cutoff) {
+                            f.delete()
+                        }
+                    }
+                }
+                Log.d(TAG, "pruneStagingCache: cleaned staging dirs")
+            } catch (_: Exception) {}
+        }
+    }
+
     fun copyUriToAppCache(context: Context, uri: Uri): Uri? {
+        pruneStagingCache(context)
         // Already one of ours (camera capture EXTRA_OUTPUT, or a previously
         // copied upload) — the file is in our cache and the WebView can read it
         // via content://. Copying it again would duplicate e.g. a 10 MB photo.

@@ -119,6 +119,19 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
         outState.putString(KEY_LAST_URL, WebViewManager.getCurrentUrl())
     }
 
+    override fun onStart() {
+        super.onStart()
+        // Visible again: cancel any pending background pause, resume if paused.
+        WebViewManager.onForegrounded()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Fully hidden (home / screen off / other app): after a grace period the
+        // WebView is paused so it stops burning CPU in the background.
+        WebViewManager.onBackgrounded()
+    }
+
     override fun onPause() {
         super.onPause()
         WebViewManager.onPause()
