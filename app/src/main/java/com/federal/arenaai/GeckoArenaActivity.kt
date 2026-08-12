@@ -20,8 +20,9 @@ import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoRuntimeSettings
 import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.GeckoView
-import org.mozilla.geckoview.WebResponseInfo
+import org.mozilla.geckoview.WebResponse
 import java.io.File
 
 /**
@@ -114,7 +115,6 @@ class GeckoArenaActivity : AppCompatActivity() {
 
         val settings = GeckoRuntimeSettings.Builder()
             .javaScriptEnabled(true)
-            .userAgentOverride(GECKO_UA)
             .remoteDebuggingEnabled(true)
             .build()
         runtime = GeckoRuntime.create(this, settings)
@@ -160,7 +160,11 @@ class GeckoArenaActivity : AppCompatActivity() {
 
     /** Build a session wired with the same policy as the main one. */
     private fun createSession(): GeckoSession {
-        return GeckoSession().apply {
+        // Per-session UA override (GeckoRuntimeSettings has no UA override).
+        val sessionSettings = GeckoSessionSettings.Builder()
+            .userAgentOverride(GECKO_UA)
+            .build()
+        return GeckoSession(sessionSettings).apply {
             progressDelegate = object : GeckoSession.ProgressDelegate {
                 override fun onPageStart(session: GeckoSession, url: String) {
                     Log.d(TAG, "page start: ${url.take(120)}")
@@ -172,7 +176,7 @@ class GeckoArenaActivity : AppCompatActivity() {
             }
 
             contentDelegate = object : GeckoSession.ContentDelegate {
-                override fun onExternalResponse(session: GeckoSession, response: WebResponseInfo) {
+                override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
                     handleDownload(response)
                 }
             }
@@ -330,24 +334,23 @@ class GeckoArenaActivity : AppCompatActivity() {
     }
 
     /** http(s) downloads → system DownloadManager (with a notification). */
-    private fun handleDownload(response: WebResponseInfo) {
-        val uriStr = response.uri ?: run {
+    private fun handleDownload(response: WebResponse) {
+        val uriStr = response.uri
+        if (uriStr.isNullOrBlank()) {
             Log.w(TAG, "download without uri")
             return
         }
-        Log.d(
-            TAG,
-            "download: $uriStr type=${response.contentType} name=${response.filename}"
-        )
+        Log.d(TAG, "download: $uriStr")
         val u = Uri.parse(uriStr)
         val scheme = u.scheme?.lowercase()
 
         if (scheme == "http" || scheme == "https") {
             try {
-                val fileName = response.filename
-                    ?: URLUtil.guessFileName(uriStr, null, response.contentType)
+                // WebResponse exposes headers/body via WebHeaderBlock; keep the
+                // prototype minimal and derive the file name from the URL.
+                val fileName = URLUtil.guessFileName(uriStr, null, null)
                 val request = DownloadManager.Request(u).apply {
-                    setMimeType(response.contentType ?: "application/octet-stream")
+                    setMimeType("application/octet-stream")
                     setTitle(fileName)
                     setDescription("Downloading $fileName")
                     setNotificationVisibility(
