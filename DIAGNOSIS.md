@@ -162,6 +162,37 @@ Caveat: pausing after 45 s hidden means live chat updates stall while hidden
 (they flush on return). If a long-hidden session's stream dropped, the page
 reconnects on resume; login state is always preserved via cookies.
 
+## Stability round — "even after load, same situation / not responding"
+
+User: after all perf fixes, the loaded app still feels like it freezes and shows
+"not responding". Two real mechanisms on low-RAM phones, both native-side:
+
+1. **Renderer OOM-kill → reload loop.** The WebView renderer is a separate
+   process. Under memory pressure Android kills it; the page then reloads
+   fully. On a low-RAM phone this repeats → an endless "freeze → reload →
+   freeze" cycle that reads as "app not responding".
+   - **Fix A:** `ArenaApp.onTrimMemory()` now forwards every trim to
+     `WebView.onTrimMemory(level)` (API 26+), so the renderer releases caches
+     BEFORE the system decides to kill it.
+   - **Fix B:** `onRenderProcessGone` counts crashes (30 s window). After 2
+     crashes it stops auto-reloading the heavy page and shows a lightweight
+     "low memory — Retry" page instead of the death spiral. The counter resets
+     on any clean `onPageFinished`.
+2. **UI-thread jank from hook re-injection.** `onProgressChanged(100)` +
+   `onPageFinished` + subframes all funneled into `injectDownloadHook`,
+   re-evaluating a ~9 KB JS string several times per load.
+   - **Fix C:** per-WebView last-injected-URL guard (WeakHashMap) — the hook is
+     evaluated at most once per document.
+3. **SPA storage.** arena.ai (React, chat history) benefits from IndexedDB;
+   WebView only enables it with `settings.databaseEnabled = true`.
+   - **Fix D:** `databaseEnabled = true` in the shared WebView settings.
+4. Version 1.2.1 (versionCode 4).
+
+Logcat markers:
+- `ArenaWebView: onRenderProcessGone (view=..) crash#1/2 ...`
+- `ArenaWebView: renderer crash loop detected — showing low-memory page`
+- `ArenaWebView: onTrimMemory level=.. — WebView trimmed`
+
 ## How to verify on a device
 
 ```bash

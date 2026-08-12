@@ -49,6 +49,17 @@ object FileTransferSupport {
     private var notificationSerial = 0
     @Volatile private var lastCachePruneMs = 0L
 
+    /**
+     * Per-WebView URL of the last document the download hook was injected into.
+     * onProgressChanged(100) + onPageFinished both fire per load (and arena.ai
+     * loads many subframes), so without this guard we re-evaluate a ~9 KB JS
+     * string several times per page load on the UI thread — measurable jank on
+     * low-end phones. The JS itself is idempotent; this avoids the work.
+     */
+    private val injectedHookUrl = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<WebView, String>()
+    )
+
     fun providerAuthority(context: Context): String =
         context.packageName + FILE_PROVIDER_AUTHORITY_SUFFIX
 
@@ -304,16 +315,20 @@ object FileTransferSupport {
         val view = webView ?: return
         // Nothing loaded yet (or navigating to about:blank) — skip; the hook
         // will be (re)injected from the next onPageFinished/onProgressChanged.
-        if (view.url == null) return
+        val url = view.url ?: return
         // Only run on Arena origins — NEVER on OAuth/identity hosts
         // (accounts.google.com, github.com, clerk, ...). The hook patches
         // URL.createObjectURL / window.open / <a>.click; that must not happen
         // on a login page.
-        if (!isArenaUrl(view.url)) return
+        if (!isArenaUrl(url)) return
+        // Already injected for this document (progress-100 + page-finished +
+        // subframes all funnel here). Skip the evaluateJavascript call.
+        if (injectedHookUrl[view] == url) return
         val js = hookJavaScript(view.context) ?: return
         view.post {
             try {
                 view.evaluateJavascript(js, null)
+                injectedHookUrl[view] = url
             } catch (e: Exception) {
                 Log.e(TAG, "injectDownloadHook failed", e)
             }
