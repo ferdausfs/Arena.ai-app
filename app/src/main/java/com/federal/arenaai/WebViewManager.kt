@@ -2,6 +2,7 @@ package com.federal.arenaai
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.content.ComponentCallbacks2
@@ -10,6 +11,8 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.content.MutableContextWrapper
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -28,6 +31,12 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.core.content.FileProvider
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
 
 object WebViewManager {
@@ -102,6 +111,30 @@ object WebViewManager {
     private var webViewPaused = false
 
     private const val PAUSE_AFTER_BACKGROUND_MS = 45_000L
+
+    // ---------------------------------------------------------------------
+    // Offline shell: last-viewed snapshot (stored on disk, shown on failure)
+    // ---------------------------------------------------------------------
+    private const val OFFLINE_DIR = "offline"
+    private const val OFFLINE_IMAGE = "offline_shell.jpg"
+    private const val OFFLINE_PREFS = "offline_shell"
+    /** Skip capturing very large viewports (keeps RAM spike + file size small). */
+    private const val OFFLINE_MAX_PIXELS = 4_000_000L
+    private var offlineCaptureScheduled = false
+
+    // ---------------------------------------------------------------------
+    // Prefetch: warm the disk cache with likely-next pages (once per session)
+    // ---------------------------------------------------------------------
+    private var prefetchStarted = false
+    private val prefetchUrls = listOf(
+        "https://arena.ai/leaderboard",
+        "https://arena.ai/agent"
+    )
+
+    // ---------------------------------------------------------------------
+    // Cache size limit (bounded storage use)
+    // ---------------------------------------------------------------------
+    private const val CACHE_SIZE_LIMIT_BYTES = 80L * 1024 * 1024
 
     /** Shown instead of auto-reloading when the renderer crash-loops (OOM). */
     private val LOW_MEMORY_PAGE_HTML = """
@@ -275,6 +308,8 @@ object WebViewManager {
             }
             level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
                 Log.d(TAG, "onTrimMemory level=$level — WebView trimmed")
+                // Storage budget: keep the disk cache bounded.
+                enforceCacheLimit()
             }
         }
     }
@@ -410,6 +445,12 @@ object WebViewManager {
                         // Flush cookies after every page load to persist session
                         flushCookies()
                         FileTransferSupport.injectDownloadHook(view)
+                        // Save the viewport to disk for the offline shell, and
+                        // kick off the once-per-session prefetch.
+                        if (view === webView) {
+                            scheduleOfflineCapture()
+                            maybePrefetch()
+                        }
                     }
 
                     override fun onReceivedHttpError(
@@ -434,6 +475,26 @@ object WebViewManager {
                 val failedUrl = request.url?.toString() ?: currentUrl
                 // Avoid recursing if we are already showing the error page.
                 if (failedUrl.startsWith("about:")) return
+
+                // Offline shell: if we have a stored snapshot of the last view,
+                // show it (with a Retry bar) so the user still sees their last
+                // chat while offline. Fall back to the plain error page.
+                val ctx = view?.context ?: mutableContext?.baseContext
+                val snapshot = ctx?.let { offlineSnapshotUri(it) }
+                if (snapshot != null) {
+                    val prefs = ctx?.getSharedPreferences(OFFLINE_PREFS, Context.MODE_PRIVATE)
+                    val title = prefs?.getString("title", null)
+                    val time = prefs?.getLong("time", 0L) ?: 0L
+                    Log.w(TAG, "load failed ($failedUrl) — showing offline shell")
+                    view?.loadDataWithBaseURL(
+                        "https://arena.ai",
+                        offlineShellHtml(snapshot, failedUrl, title, time),
+                        "text/html",
+                        "UTF-8",
+                        null
+                    )
+                    return
+                }
 
                 // Escape before interpolating into the href attribute — a URL
                 // containing quotes (e.g. a query param) must not break out.
@@ -1111,9 +1172,13 @@ object WebViewManager {
 
     /**
      * App fully hidden (onStop): schedule the delayed background pause so the
-     * renderer stops burning CPU once the app has been away for a while.
+     * renderer stops burning CPU once the app has been away for a while. Also
+     * saves the offline snapshot of what the user was looking at, and checks
+     * the cache-size budget.
      */
     fun onBackgrounded() {
+        captureOfflineSnapshot()
+        enforceCacheLimit()
         lifecycleHandler.removeCallbacks(pauseRunnable)
         lifecycleHandler.postDelayed(pauseRunnable, PAUSE_AFTER_BACKGROUND_MS)
     }
@@ -1126,6 +1191,223 @@ object WebViewManager {
             try { webView?.resumeTimers() } catch (_: Exception) {}
             try { webView?.onResume() } catch (_: Exception) {}
             Log.d(TAG, "WebView resumed (foreground)")
+        }
+    }
+
+    // =====================================================================
+    // OFFLINE SHELL — the last successfully-loaded arena view is stored on
+    // disk (viewport screenshot + URL). When the main frame fails to load
+    // (no network, server down), that saved view is shown instead of a blank
+    // error, so the user can still SEE their last chat without a connection.
+    // =====================================================================
+
+    private fun offlineDir(context: Context): File =
+        File(context.cacheDir, OFFLINE_DIR).apply { mkdirs() }
+
+    private fun offlineImageFile(context: Context): File =
+        File(offlineDir(context), OFFLINE_IMAGE)
+
+    /** Debounced snapshot after a successful arena page load. */
+    private fun scheduleOfflineCapture() {
+        if (offlineCaptureScheduled) return
+        offlineCaptureScheduled = true
+        lifecycleHandler.postDelayed({
+            offlineCaptureScheduled = false
+            captureOfflineSnapshot()
+        }, 1500L)
+    }
+
+    /** Capture the current viewport to a JPEG on disk (one file, overwritten). */
+    private fun captureOfflineSnapshot() {
+        val view = webView ?: return
+        if (webViewPaused) return
+        val ctx = mutableContext?.baseContext ?: return
+        val url = view.url ?: return
+        if (!FileTransferSupport.isArenaUrl(url)) return
+        val w = view.width
+        val h = view.height
+        if (w <= 0 || h <= 0) return
+        if (w.toLong() * h.toLong() > OFFLINE_MAX_PIXELS) return
+        try {
+            val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            view.draw(Canvas(bitmap))
+            val saved = FileOutputStream(offlineImageFile(ctx)).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 70, out)
+            }
+            bitmap.recycle()
+            if (saved) {
+                ctx.getSharedPreferences(OFFLINE_PREFS, Context.MODE_PRIVATE).edit()
+                    .putString("url", url)
+                    .putString("title", view.title ?: "")
+                    .putLong("time", System.currentTimeMillis())
+                    .apply()
+                Log.d(TAG, "offline snapshot saved (${w}x$h) for $url")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "captureOfflineSnapshot failed", e)
+        }
+    }
+
+    /** The stored snapshot's content:// URI, or null if none exists. */
+    private fun offlineSnapshotUri(context: Context): Uri? {
+        val file = offlineImageFile(context)
+        return if (file.exists() && file.length() > 0) {
+            try {
+                FileProvider.getUriForFile(
+                    context,
+                    FileTransferSupport.providerAuthority(context),
+                    file
+                )
+            } catch (_: Exception) {
+                null
+            }
+        } else {
+            null
+        }
+    }
+
+    /** HTML page: stored snapshot image + "You're offline" + Retry. */
+    private fun offlineShellHtml(snapshotUri: Uri, failedUrl: String, title: String?, timeMs: Long): String {
+        fun esc(s: String): String = s
+            .replace("&", "&amp;")
+            .replace("\"", "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        val time = if (timeMs > 0) {
+            try {
+                SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date(timeMs))
+            } catch (_: Exception) {
+                ""
+            }
+        } else {
+            ""
+        }
+        val t = title?.takeIf { it.isNotBlank() } ?: "saved view"
+        return """
+            <html><body style="margin:0;background:#1a1a2e;color:#fff;font-family:sans-serif;">
+            <div style="padding:12px 16px;background:#0f172a;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+              <div style="flex:1;min-width:200px;">
+                <div style="font-weight:700;">You're offline</div>
+                <div style="color:#94a3b8;font-size:13px;">${esc(t)} · $time</div>
+              </div>
+              <a href="${esc(failedUrl)}" style="background:#4fc3f7;color:#0f172a;
+                 padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:600;">Retry</a>
+            </div>
+            <img src="${esc(snapshotUri.toString())}" style="width:100%;display:block;"/>
+            </body></html>
+        """.trimIndent()
+    }
+
+    // =====================================================================
+    // PREFETCH — after the app has idled on arena.ai, load a couple of
+    // high-value pages in a hidden WebView so their JS/CSS/images land in the
+    // shared disk cache. Opening them next time then renders from storage
+    // instead of the network (much faster). Guarded: skipped on low-RAM
+    // devices and on metered (mobile-data) connections.
+    // =====================================================================
+
+    private fun maybePrefetch() {
+        if (prefetchStarted) return
+        prefetchStarted = true
+        val ctx = mutableContext?.baseContext ?: return
+        if (isMeteredConnection(ctx)) {
+            Log.d(TAG, "prefetch skipped (metered connection)")
+            return
+        }
+        if (!hasEnoughMemory(ctx)) {
+            Log.d(TAG, "prefetch skipped (low-RAM device)")
+            return
+        }
+        lifecycleHandler.postDelayed({ runPrefetch(ctx) }, 8000L)
+    }
+
+    private fun isMeteredConnection(ctx: Context): Boolean {
+        return try {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            cm?.isActiveNetworkMetered == true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun hasEnoughMemory(ctx: Context): Boolean {
+        return try {
+            val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            (am?.memoryClass ?: 0) >= 256 // MB
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** Load the prefetch URLs sequentially in a hidden WebView, then destroy. */
+    private fun runPrefetch(ctx: Context) {
+        Log.d(TAG, "prefetch starting: $prefetchUrls")
+        val prefetchView = try {
+            WebView(ctx.applicationContext)
+        } catch (e: Exception) {
+            Log.e(TAG, "prefetch: cannot create WebView", e)
+            return
+        }
+        prefetchView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            cacheMode = WebSettings.LOAD_DEFAULT
+        }
+        var index = 0
+        prefetchView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                Log.d(TAG, "prefetch cached: $url")
+                index++
+                if (index < prefetchUrls.size) {
+                    view?.loadUrl(prefetchUrls[index])
+                } else {
+                    try { view?.destroy() } catch (_: Exception) {}
+                }
+            }
+        }
+        // Safety timeout: never let the hidden WebView live forever.
+        lifecycleHandler.postDelayed({
+            try { prefetchView.destroy() } catch (_: Exception) {}
+        }, 60_000L)
+        try {
+            prefetchView.loadUrl(prefetchUrls[0])
+        } catch (e: Exception) {
+            Log.e(TAG, "prefetch load failed", e)
+            try { prefetchView.destroy() } catch (_: Exception) {}
+        }
+    }
+
+    // =====================================================================
+    // CACHE SIZE LIMIT — Chromium stores its HTTP cache on the phone's
+    // storage. Measure the app cache dir and, when it exceeds the budget,
+    // clear the HTTP cache (cookies/localStorage are untouched) on a
+    // background thread. Storage use stays bounded; RAM is not involved.
+    // =====================================================================
+
+    /** Public: check the cache size now (called from trims and backgrounding). */
+    fun enforceCacheLimit() {
+        val ctx = mutableContext?.baseContext ?: return
+        ioExecutor.execute {
+            try {
+                val size = dirSize(ctx.cacheDir)
+                if (size > CACHE_SIZE_LIMIT_BYTES) {
+                    Log.w(
+                        TAG,
+                        "cache ${size / 1048576}MB > ${CACHE_SIZE_LIMIT_BYTES / 1048576}MB — clearing HTTP cache"
+                    )
+                    mainHandler.post {
+                        try { webView?.clearCache(false) } catch (_: Exception) {}
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun dirSize(dir: File): Long {
+        return if (dir.isFile) {
+            dir.length()
+        } else {
+            dir.listFiles()?.sumOf { dirSize(it) } ?: 0L
         }
     }
 
