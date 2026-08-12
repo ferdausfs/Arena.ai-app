@@ -250,6 +250,14 @@ object FileTransferSupport {
         }
     }
 
+    /**
+     * Copying huge picked files into the app cache would fill the phone's
+     * storage ("the app fills my storage"). Above this size we skip the copy
+     * and hand the raw content:// URI to the page (best effort — the picker
+     * grant usually outlives the upload).
+     */
+    private const val MAX_COPY_BYTES = 150L * 1024 * 1024
+
     fun copyUriToAppCache(context: Context, uri: Uri): Uri? {
         pruneStagingCache(context)
         // Already one of ours (camera capture EXTRA_OUTPUT, or a previously
@@ -257,6 +265,14 @@ object FileTransferSupport {
         // via content://. Copying it again would duplicate e.g. a 10 MB photo.
         if (uri.authority == providerAuthority(context)) {
             Log.d(TAG, "copyUriToAppCache: uri already ours, skipping copy: $uri")
+            return uri
+        }
+        val size = querySize(context, uri)
+        if (size > MAX_COPY_BYTES) {
+            Log.w(
+                TAG,
+                "copyUriToAppCache: skipping copy (${size / 1048576}MB > cap) — passing raw uri"
+            )
             return uri
         }
         return try {
@@ -276,6 +292,24 @@ object FileTransferSupport {
         } catch (e: Exception) {
             Log.e(TAG, "copyUriToAppCache failed for $uri", e)
             null
+        }
+    }
+
+    /** Best-effort size of a content:// URI; -1 when unknown. */
+    private fun querySize(context: Context, uri: Uri): Long {
+        return try {
+            context.contentResolver.query(
+                uri, arrayOf(OpenableColumns.SIZE), null, null, null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val idx = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (idx >= 0) c.getLong(idx) else -1L
+                } else {
+                    -1L
+                }
+            } ?: -1L
+        } catch (_: Exception) {
+            -1L
         }
     }
 
@@ -499,6 +533,9 @@ object FileTransferSupport {
 
     /**
      * Persist an already-decoded temp file (chunked blob path) and delete it.
+     * Streams the file into MediaStore / the Downloads dir instead of loading
+     * it into a byte[] — a large blob would otherwise spike the heap (~64 MB)
+     * and risk OOM on low-RAM phones.
      */
     fun saveFileToDownloads(
         context: Context,
@@ -518,13 +555,96 @@ object FileTransferSupport {
                     toast(context, context.getString(R.string.download_too_large))
                     return@execute
                 }
-                val bytes = file.readBytes()
-                persistBytes(context, bytes, mimeType, fileName)
+                val mime = mimeType?.takeIf { it.isNotBlank() && it.length < 128 }
+                    ?: "application/octet-stream"
+                val name = sanitizeFileName(
+                    fileName?.takeIf { it.isNotBlank() }
+                        ?: URLUtil.guessFileName("https://arena.ai/download", null, mime)
+                )
+                val uri = writeFileStream(context, file, mime, name)
+                if (uri == null) {
+                    Log.e(TAG, "writeFileStream returned null for $name")
+                    toast(context, context.getString(R.string.download_failed))
+                    return@execute
+                }
+                Log.d(TAG, "saved blob name=$name mime=$mime bytes=${file.length()} uri=$uri")
+                notifySaved(context, uri, name, mime)
+                toast(context, context.getString(R.string.download_complete, name))
             } catch (e: Exception) {
                 Log.e(TAG, "saveFileToDownloads failed", e)
                 toast(context, context.getString(R.string.download_failed))
             } finally {
                 file.delete()
+            }
+        }
+    }
+
+    /**
+     * Stream a temp file into the public Downloads collection without loading
+     * it into memory. API 29+: MediaStore.Downloads; API 24-28: app-specific
+     * external Downloads dir (no storage permission needed).
+     */
+    private fun writeFileStream(
+        context: Context,
+        file: File,
+        mime: String,
+        fileName: String
+    ): Uri? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                    put(MediaStore.Downloads.MIME_TYPE, mime)
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                }
+                val resolver = context.contentResolver
+                val uri = resolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
+                ) ?: return null
+                try {
+                    val out = resolver.openOutputStream(uri) ?: run {
+                        resolver.delete(uri, null, null)
+                        return null
+                    }
+                    out.use { o ->
+                        file.inputStream().use { i -> i.copyTo(o) }
+                    }
+                    values.clear()
+                    values.put(MediaStore.Downloads.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                    uri
+                } catch (e: Exception) {
+                    Log.e(TAG, "MediaStore stream write failed", e)
+                    try { resolver.delete(uri, null, null) } catch (_: Exception) {}
+                    null
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "writeFileStream (Q+) failed", e)
+                null
+            }
+        } else {
+            try {
+                val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                    ?: context.filesDir
+                if (!dir.exists() && !dir.mkdirs()) {
+                    Log.e(TAG, "cannot create download dir $dir")
+                    return null
+                }
+                val dest = uniqueFile(dir, fileName)
+                file.inputStream().use { i ->
+                    dest.outputStream().use { o -> i.copyTo(o) }
+                }
+                MediaScannerConnection.scanFile(
+                    context,
+                    arrayOf(dest.absolutePath),
+                    arrayOf(mime),
+                    null
+                )
+                FileProvider.getUriForFile(context, providerAuthority(context), dest)
+            } catch (e: Exception) {
+                Log.e(TAG, "writeFileStream (legacy) failed", e)
+                null
             }
         }
     }

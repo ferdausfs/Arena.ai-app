@@ -259,6 +259,25 @@ Logcat markers:
 
 Version 1.3.1 (versionCode 6).
 
+## Deep review round (v1.3.2) — "the app has bugs again", 8 fixes
+
+Full code audit of the merged tree; eight real issues found and fixed:
+
+| # | Severity | Bug | Fix |
+|---|----------|-----|-----|
+| 1 | **HIGH (crash)** | `onTrimMemory` severe branch called `webView.clearCache()/clearHistory()` on the **IO executor**. WebView is a View — its methods must run on the **main thread**; background-thread calls can crash ("Calling View methods from another thread"). | Both calls moved to `mainHandler.post`. |
+| 2 | **HIGH (jank/freeze)** | `captureOfflineSnapshot()` did the full-screen bitmap + **JPEG compress + file write on the UI thread** 1.5 s after every page load and on backgrounding → interaction freezes on low-end phones. | Only bitmap alloc + `view.draw()` stay on the UI thread; compress, write and base64 encoding moved to the IO executor. |
+| 3 | MEDIUM | `enforceCacheLimit()` measured the **whole cacheDir** (uploads, camera, blob-in, offline included) but cleared only the HTTP cache — a few big uploads tripped the 80 MB budget and wiped the HTTP cache pointlessly. | `dirSize` now excludes the staging dirs (they have their own pruning). |
+| 4 | MEDIUM (storage) | `copyUriToAppCache()` had no size cap — a giant picked file (e.g. a video) was copied wholesale into the app cache, filling the phone's storage. | Size queried first; copies above 150 MB are skipped and the raw URI is passed instead. |
+| 5 | MEDIUM | Offline shell embedded the snapshot via `<img src="content://…">`, which is unreliable on some devices/WebView versions. | Snapshot is pre-encoded to a **base64 data URI** on the IO thread at capture time and embedded directly — renders everywhere, no file I/O on the error path. |
+| 6 | MEDIUM (security) | The prefetch hidden WebView had no navigation guard — an off-site redirect would load arbitrary content with JS enabled. | `shouldOverrideUrlLoading` blocks non-arena URLs and aborts the prefetch chain. |
+| 7 | MEDIUM (OOM) | `saveFileToDownloads()` did `file.readBytes()` — a full ~64 MB heap spike for large blob downloads on low-RAM phones. | New `writeFileStream()` streams the temp file into MediaStore / Downloads dir (no byte[] in heap). |
+| 8 | LOW | The popup WebChromeClient lacked `onCreateWindow` — `window.open()` from inside a popup (nested OAuth window) silently failed. | Delegates to the shared popup handler. |
+
+Also: removed the now-unused `FileProvider` import/`offlineSnapshotUri` (base64 path replaced it).
+
+Version 1.3.2 (versionCode 7).
+
 ## How to verify on a device
 
 ```bash
