@@ -137,6 +137,31 @@ Logcat markers after this round:
 - `ArenaWebView: shouldOverride blob (main frame): ...` — only for real downloads, never for iframe previews.
 - Download hook now only logs install attempts on arena hosts.
 
+## Performance round — "5 MB app freezes my phone, Termux (10 GB) doesn't"
+
+Termux is native code with no browser engine; this app embeds Chromium (WebView).
+The WebView renderer is the heavy part — it keeps animating and running JS
+timers, and holds a big DOM for arena.ai's chat/workspace. A 5 MB APK tells you
+nothing about RAM/CPU; the embedded Chrome is what counts. Changes:
+
+| # | What | Why |
+|---|------|-----|
+| 1 | **Delayed background pause (45 s)** — `onStop` schedules `WebView.onPause()+pauseTimers()`; `onStart` cancels/resumes. | Hidden app stopped burning CPU/GPU after a grace period → no more phone-wide slowdown. Quick switches & system pickers (<45 s) never pause, so streams/session stay live. |
+| 2 | **Renderer priority** — checked: the platform default is already `RENDERER_PRIORITY_IMPORTANT` regardless of visibility (docs), so no explicit `setRendererPriorityPolicy` call is needed (it's an instance method, and changing the default is discouraged). | Under memory pressure the renderer is NOT aggressively OOM-killed by default, so big sessions stay loaded. |
+| 3 | **`flushCookies()` moved to the IO executor.** | It ran on the UI thread on every `onPageFinished` (disk I/O → jank). |
+| 4 | **Console message rate-limit** (main + popup WebChromeClients). | arena.ai's React SPA logs a lot; formatting strings on the UI thread for every message janked the app. Errors/warnings always logged; other levels capped at 30/page-load. |
+| 5 | **Staging-cache pruning** (uploads/camera/blob-in, ≥7 days old, ≤1/h). | Uploads & camera captures accumulated in cache forever → disk growth + slow phone. |
+| 6 | **Explicit `android:hardwareAccelerated="true"`.** | Documents/guarantees GPU rendering for the WebView. |
+| 7 | Version bump to 1.2.0 (versionCode 3). | Distinguish performance builds. |
+
+Logcat markers:
+- `ArenaWebView: WebView paused (hidden > 45000 ms)` after ~45 s in background.
+- `ArenaWebView: WebView resumed (foreground)` on return.
+
+Caveat: pausing after 45 s hidden means live chat updates stall while hidden
+(they flush on return). If a long-hidden session's stream dropped, the page
+reconnects on resume; login state is always preserved via cookies.
+
 ## How to verify on a device
 
 ```bash
