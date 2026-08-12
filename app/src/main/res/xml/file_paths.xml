@@ -1,15 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-    FileProvider paths for the Arena AI app.
-    - cache-path: camera capture output + staging files handed to DownloadManager.
-    - external-files-path: app-specific Downloads dir used on API 24-28 when
-      WRITE_EXTERNAL_STORAGE is denied (so the "Download complete" notification
-      can still open the saved file).
--->
 <paths>
+    <!-- Copied picker files, re-exposed so WebView can read them. -->
+    <cache-path name="uploads" path="uploads/" />
+    <!-- Camera EXTRA_OUTPUT for image capture from the file chooser. -->
     <cache-path name="camera" path="camera/" />
-    <cache-path name="cache_shared" path="." />
-    <external-cache-path name="external_cache_shared" path="." />
-    <external-files-path name="app_downloads" path="Download/" />
-    <external-files-path name="app_files" path="." />
+    <!-- API 24–28 blob downloads (app-specific external dir). -->
+    <external-files-path name="ext_downloads" path="Download/" />
+    <files-path name="int_downloads" path="." />
 </paths>

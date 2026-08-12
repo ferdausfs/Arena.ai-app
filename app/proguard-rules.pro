@@ -6,12 +6,15 @@
 # later does not silently break the WebView layer.
 # ----------------------------------------------------------------------------
 
-# Keep the WebView classes and any JS-injected interfaces (none today, but this
-# future-proofs any @JavascriptInterface methods).
+# Keep the WebView classes and any JS-injected interfaces.
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }
 -keep @android.webkit.JavascriptInterface class * { *; }
+-keep class com.federal.arenaai.ArenaNativeBridge { *; }
+-keepclassmembers class com.federal.arenaai.ArenaNativeBridge {
+    @android.webkit.JavascriptInterface <methods>;
+}
 
 # Keep the Application and Service entry points referenced from the manifest.
 -keep class com.federal.arenaai.ArenaApp { *; }
