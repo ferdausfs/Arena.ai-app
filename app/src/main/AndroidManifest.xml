@@ -79,18 +79,6 @@
 
         </activity>
 
-        <!--
-            PROTOTYPE: arena.ai on a bundled Firefox engine (GeckoView).
-            Not exported; launch via:
-              adb shell am start -n com.federal.arenaai/.GeckoArenaActivity
-        -->
-        <activity
-            android:name=".GeckoArenaActivity"
-            android:exported="false"
-            android:launchMode="singleTask"
-            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode"
-            android:theme="@style/AppTheme" />
-
         <service
             android:name=".ArenaSessionService"
             android:exported="false"

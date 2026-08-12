@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Dialog
 import android.content.ActivityNotFoundException
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
@@ -242,6 +243,43 @@ object WebViewManager {
     }
 
     /**
+     * Called from Application.onTrimMemory (device low on RAM).
+     *
+     * 1. Forward to the WebView renderer (reflective: `WebView.onTrimMemory` is
+     *    not a public API in the compile SDK) so the renderer frees its own
+     *    caches BEFORE the system OOM-kills it — a killed renderer means a full
+     *    page reload, which is exactly the "freeze → not responding" cycle.
+     * 2. On SEVERE trims, drop the disk cache + navigation history too. Both are
+     *    stored on the phone's storage (not RAM), but clearing them lets
+     *    Chromium reclaim memory-backed bookkeeping — the app gives storage back
+     *    to the OS instead of letting RAM pressure build up.
+     */
+    fun onTrimMemory(level: Int) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val m = WebView::class.java.getMethod(
+                    "onTrimMemory", Int::class.javaPrimitiveType
+                )
+                m.invoke(null, level)
+            } catch (_: Throwable) {}
+        }
+        when {
+            // TRIM_MEMORY_RUNNING_CRITICAL (15) and everything above it —
+            // including background TRIM_MEMORY_COMPLETE (80) — counts as severe.
+            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> {
+                Log.w(TAG, "onTrimMemory severe (level=$level) — clearing disk cache + history")
+                ioExecutor.execute {
+                    try { webView?.clearCache(false) } catch (_: Exception) {}
+                    try { webView?.clearHistory() } catch (_: Exception) {}
+                }
+            }
+            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
+                Log.d(TAG, "onTrimMemory level=$level — WebView trimmed")
+            }
+        }
+    }
+
+    /**
      * Open external links (non-auth, external websites) in user's default external browser.
      */
     fun openInExternalBrowser(context: Context?, uri: Uri) {
@@ -306,6 +344,10 @@ object WebViewManager {
         settings.builtInZoomControls = true
         settings.displayZoomControls = false
         settings.mediaPlaybackRequiresUserGesture = true
+        // Disk-first caching: Chromium keeps its HTTP cache + IndexedDB +
+        // localStorage ON THE PHONE'S STORAGE (app cache dir), not in RAM, and
+        // LOAD_DEFAULT reuses it across sessions — so returning to the app
+        // re-renders from disk instead of re-downloading the whole SPA.
         settings.cacheMode = WebSettings.LOAD_DEFAULT
         settings.setSupportMultipleWindows(true)
         settings.javaScriptCanOpenWindowsAutomatically = true

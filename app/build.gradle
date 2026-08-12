@@ -13,8 +13,7 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace "com.federal.arenaai"
-    // 35: GeckoView (139+) requires compileSdk >= 35; targetSdk stays 34.
-    compileSdk 35
+    compileSdk 34 // Use 34 to be safe with Android 14 APIs
 
     signingConfigs {
         release {
@@ -31,16 +30,10 @@ android {
         applicationId "com.federal.arenaai"
         minSdk 24
         targetSdk 34
-        versionCode 4
-        versionName "1.2.1"
+        versionCode 5
+        versionName "1.3.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-
-        // The GeckoView (Firefox) engine is only bundled for the two ABIs that
-        // cover virtually all phones; keeps the prototype APK ~2x smaller.
-        ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a'
-        }
     }
 
     buildTypes {
@@ -74,14 +67,6 @@ android {
         abortOnError false
         checkReleaseBuilds false
     }
-
-    // GeckoView loads its native libraries from the APK (extract them at
-    // install time) — required by the GeckoView docs.
-    packagingOptions {
-        jniLibs {
-            useLegacyPackaging = true
-        }
-    }
 }
 
 dependencies {
@@ -93,11 +78,4 @@ dependencies {
     // Chrome Custom Tabs — required for Google OAuth (Google blocks embedded WebView)
     // See https://developers.googleblog.com/2016/08/modernizing-oauth-interactions-in-native-apps.html
     implementation 'androidx.browser:browser:1.8.0'
-
-    // Prototype: bundled Firefox engine (no system WebView/Chrome dependency).
-    // Resolved from https://maven.mozilla.org/maven2/ (added in root build.gradle).
-    // Pin 124: it depends on kotlin-stdlib 1.8.x (compatible with this project's
-    // Kotlin 1.9.22); newer GeckoView (139+) pulls kotlin-stdlib 2.1.x which the
-    // 1.9.22 compiler cannot read.
-    implementation 'org.mozilla.geckoview:geckoview:124.0.20240401114208'
 }
