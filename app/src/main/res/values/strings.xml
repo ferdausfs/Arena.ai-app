@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">Arena AI</string>
     <string name="file_chooser_title">Choose a file</string>
+    <string name="all_files">All files</string>
     <string name="download_started">Downloading %1$s</string>
     <string name="download_in_progress">Downloading %1$s</string>
     <string name="download_complete">Downloaded %1$s</string>

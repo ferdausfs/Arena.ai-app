@@ -231,6 +231,8 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
 
     override fun onDestroy() {
         super.onDestroy()
+        // Dismiss any open OAuth popup dialog so it cannot outlive the Activity.
+        WebViewManager.dismissActivePopup()
         // Release any pending file-chooser callback so the next picker works.
         WebViewManager.cancelPendingFileChooser()
         WebViewManager.startFileChooser = null

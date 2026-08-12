@@ -31,6 +31,13 @@ Cannot attach `chrome://inspect` or `adb logcat` to a device from this environme
 - Tap the **+** icon in the chat composer, *or* paste a file.
 - Battle mode accepts PNG / JPEG / WebP / PDF.
 - Agent mode also accepts GIF, txt, md, csv, html, xml, css, js, json.
+- **`.zip` is not in either list** — that is arena.ai's own restriction, not a
+  WebView limitation (Chrome applies the same `accept` filter and greys out
+  zips). The app adds an **"All files"** picker action when the page restricts
+  `accept`, so any file (e.g. `.zip`) can still be selected; arena.ai's own
+  validation then decides whether to accept it. Practical workaround: extract
+  the zip and upload the files individually — Agent Mode accepts txt/md/js/json/
+  csv/html/xml/css.
 
 The user confirmed the same tap in **Chrome** opens Android’s “choose an action” sheet. That is the `<input type="file">` path (`WebChromeClient.onShowFileChooser`). It is **not** `window.showOpenFilePicker()` — that API is not implemented on Chrome Android, so it cannot be what Chrome is showing.
 
@@ -65,6 +72,70 @@ That is root cause #1 in the original brief: `DownloadListener` (once present) f
 - Picker results are copied into cache and re-exposed via `FileProvider` so the renderer can still read them after the picker’s temporary grant expires.
 - `ValueCallback` is invoked exactly once (null on cancel / destroy / renderer crash).
 - OAuth path, UA cleaning, cookie sharing, `allowFileAccess=false`, `MIXED_CONTENT_NEVER_ALLOW`, hardened `intent://` are unchanged.
+
+## Follow-up: "message send fails once, resend works"
+
+Reported on a real device: sending a message shows "something went wrong"; the
+same message succeeds when sent again.
+
+Root cause (ranked):
+
+1. **`WebView.onPause()` on Activity pause (HIGH, primary suspect).** The app
+   called `WebViewManager.onPause() → webView.onPause()` whenever the Activity
+   paused — i.e. every time the screen locks or the user switches apps. That
+   kills the page's in-flight connections (SSE / websocket / fetch). After
+   returning, the page still believes a connection exists, so the **first**
+   message send fails once; the client reconnects and the retry works. This
+   also contradicted the app's design: the foreground service exists precisely
+   to keep the arena.ai session alive in the background.
+   **Fix:** `onPause()` no longer pauses the WebView — it only flushes cookies.
+   `onResume()` is a no-op.
+
+2. **File-chooser callback double-invocation (MEDIUM).** `deliverFileChooserResult`
+   copies picked URIs on a background executor before invoking the
+   `ValueCallback`. If a new chooser started (or the chooser was cancelled)
+   during that copy, the old callback had already been released with `null` —
+   the async delivery would then invoke it a *second* time. ValueCallbacks must
+   be invoked exactly once; a double call can trigger a JS error in the page.
+   **Fix:** a `fileChooserGeneration` counter is bumped whenever the pending
+   chooser is replaced/cancelled; the async delivery skips if the generation
+   moved on.
+
+3. **Unbounded blob registry in the download hook (MEDIUM, memory).**
+   `window.__arenaBlobs` remembered every Blob the page created
+   (`URL.createObjectURL`) with no eviction — a long chat with generated images
+   grows it without bound, pressuring the renderer.
+   **Fix:** cap at 128 entries with FIFO eviction; older blobs fall back to
+   `fetch(url)` if a download is requested for them.
+
+4. **No HTTP-error visibility (LOW, diagnostics).** `onReceivedHttpError` was
+   not overridden, so a main-frame 4xx/5xx (what the page surfaces as
+   "something went wrong") left no trace in logcat.
+   **Fix:** main and popup WebViewClients log main-frame HTTP status.
+
+5. **Hook evaluated before load (LOW).** `injectDownloadHook` now skips views
+   whose `url` is still null (about:blank / not loaded).
+
+Logcat markers after this fix:
+- `ArenaWebView: HTTP 4xx/5xx ...` when the site's API returns an error.
+- No `onPause`-related connection drops; first send after returning to the app
+  should succeed.
+
+## Follow-up round 2: deep review — 7 more bugs fixed
+
+| # | Severity | Bug | Fix |
+|---|----------|-----|-----|
+| 1 | **HIGH (functional)** | `shouldOverrideUrlLoading` intercepted **all** `blob:` navigations as downloads — including **subframe** loads (`<iframe src="blob:...">`, e.g. generated PDF/HTML previews). The preview was saved as a file AND failed to render. | Intercept only when `request.isForMainFrame == true`; subframe blob loads are left to the renderer. |
+| 2 | **MEDIUM (OAuth safety)** | After the document-start API was dropped, the download hook was evaluated via `evaluateJavascript` on **every** page — including OAuth hosts (accounts.google.com, github.com, clerk…). The hook patches `URL.createObjectURL`, `window.open` and `<a>.click` globally; the design intent (documented) was "never on OAuth hosts". | `injectDownloadHook` now checks the page host against arena.ai / lmarena.ai / lmsys.org / chatbot-arena.org (+ subdomains) and skips everything else. |
+| 3 | MEDIUM (perf) | `copyUriToAppCache` copied **our own FileProvider files** (camera capture, previously copied uploads) into cache again — duplicating e.g. a 10 MB photo on every upload. | Skip the copy when `uri.authority == providerAuthority(context)`. |
+| 4 | MEDIUM (perf/OOM) | `saveDataUrl` decoded multi-MB `data:` URLs **synchronously on the DownloadListener thread** (stalls the WebView), with no size pre-check (OOM risk). | Pre-check estimated decoded size vs `MAX_BLOB_BYTES` (reject + toast before decoding); decode + write moved to the IO executor. |
+| 5 | LOW (diagnostics) | On API 33+, if POST_NOTIFICATIONS is denied, download notifications vanish with no trace. | `notifySaved` logs when the permission is missing (file is still saved). |
+| 6 | LOW (security) | The error page interpolated `failedUrl` raw into an `href` attribute — a URL containing `"` could break out of the attribute. | HTML-escape `& " < >` before interpolation. |
+| 7 | LOW (leak) | Activity destroy did not dismiss an open OAuth popup dialog → the dialog kept an Activity reference. | `MainActivity.onDestroy` now calls `WebViewManager.dismissActivePopup()`. |
+
+Logcat markers after this round:
+- `ArenaWebView: shouldOverride blob (main frame): ...` — only for real downloads, never for iframe previews.
+- Download hook now only logs install attempts on arena hosts.
 
 ## How to verify on a device
 
