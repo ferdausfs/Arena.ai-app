@@ -635,15 +635,50 @@ object WebViewManager {
                         isUserGesture: Boolean,
                         resultMsg: Message?
                     ): Boolean {
-                        val activity = getActivityFromContext(view?.context)
-                            ?: getActivityFromContext(mutableContext)
+                        return createPopup(view, isDialog, isUserGesture, resultMsg)
+                    }
+                }
 
-                        if (activity == null || activity.isFinishing || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed)) {
-                            Log.w(TAG, "onCreateWindow: no live Activity")
-                            return false
-                        }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                    WebView.setWebContentsDebuggingEnabled(
+                        (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                    )
+                }
 
-                        val popupWebView = WebView(activity).apply {
+                // Renderer priority: the platform default is already
+                // RENDERER_PRIORITY_IMPORTANT regardless of visibility, so no
+                // explicit policy call is needed (setRendererPriorityPolicy is
+                // an instance method, and the docs recommend not changing the
+                // default unless handling renderer crashes).
+                loadUrl(currentUrl)
+            }
+        } else {
+            mutableContext?.baseContext = context
+            webView?.let { configureCookies(it) }
+        }
+        return webView!!
+    }
+
+    /**
+     * Shared window.open() handler used by BOTH the main and popup WebViews:
+     * creates the in-app OAuth popup dialog with a fully-configured secondary
+     * WebView (upload/download/bridge included).
+     */
+    private fun createPopup(
+        view: WebView?,
+        isDialog: Boolean,
+        isUserGesture: Boolean,
+        resultMsg: Message?
+    ): Boolean {
+        val activity = getActivityFromContext(view?.context)
+            ?: getActivityFromContext(mutableContext)
+
+        if (activity == null || activity.isFinishing || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed)) {
+            Log.w(TAG, "onCreateWindow: no live Activity")
+            return false
+        }
+
+        val popupWebView = WebView(activity).apply {
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -681,7 +716,7 @@ object WebViewManager {
                                 // A window.open() from inside a popup (nested
                                 // OAuth window) would otherwise silently fail —
                                 // delegate to the same popup handler.
-                                return handleCreateWindow(view, isDialog, isUserGesture, resultMsg)
+                                return createPopup(view, isDialog, isUserGesture, resultMsg)
                             }
 
                             override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -795,27 +830,6 @@ object WebViewManager {
                         transport?.webView = popupWebView
                         resultMsg?.sendToTarget()
                         return true
-                    }
-                }
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-                    WebView.setWebContentsDebuggingEnabled(
-                        (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
-                    )
-                }
-
-                // Renderer priority: the platform default is already
-                // RENDERER_PRIORITY_IMPORTANT regardless of visibility, so no
-                // explicit policy call is needed (setRendererPriorityPolicy is
-                // an instance method, and the docs recommend not changing the
-                // default unless handling renderer crashes).
-                loadUrl(currentUrl)
-            }
-        } else {
-            mutableContext?.baseContext = context
-            webView?.let { configureCookies(it) }
-        }
-        return webView!!
     }
 
     /**
