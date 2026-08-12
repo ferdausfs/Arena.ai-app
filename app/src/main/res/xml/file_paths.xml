@@ -4,6 +4,8 @@
     <cache-path name="uploads" path="uploads/" />
     <!-- Camera EXTRA_OUTPUT for image capture from the file chooser. -->
     <cache-path name="camera" path="camera/" />
+    <!-- Offline-shell snapshot, shown when the page cannot load. -->
+    <cache-path name="offline" path="offline/" />
     <!-- API 24–28 blob downloads (app-specific external dir). -->
     <external-files-path name="ext_downloads" path="Download/" />
     <files-path name="int_downloads" path="." />

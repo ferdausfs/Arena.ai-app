@@ -227,6 +227,38 @@ Logcat markers:
 - `ArenaWebView: onTrimMemory severe (level=..) — clearing disk cache + history`
 - `ArenaWebView: onTrimMemory level=.. — WebView trimmed`
 
+## Offline-shell + prefetch + cache limit (v1.3.1) — the "use the phone's storage" round
+
+User asked for three storage-based features; all implemented:
+
+1. **Prefetch ("next open is instant from storage")** — after the app idles on
+   arena.ai, a hidden WebView loads a couple of high-value pages
+   (`/leaderboard`, `/agent`) so their JS/CSS/images land in the shared disk
+   cache. Opening them next time renders from storage instead of the network.
+   Guarded: skipped on metered (mobile-data) connections and on low-RAM
+   devices (`memoryClass < 256 MB`); the hidden WebView is destroyed after
+   loading (with a 60 s safety timeout) so it cannot leak.
+2. **Offline shell ("see your last chat without a connection")** — after a
+   successful arena page load (debounced) and whenever the app is backgrounded,
+   the current viewport is saved as a JPEG to the app cache (one bounded file).
+   When the main frame then fails to load (no network / server down), the saved
+   snapshot is shown with a "You're offline · last saved view" bar and a Retry
+   link instead of a blank error — the user still sees their last chat offline.
+   The snapshot is exposed to the WebView via FileProvider (`allowContentAccess`
+   is already on).
+3. **Cache size limit** — Chromium's HTTP cache lives on the phone's storage;
+   the app now measures the cache dir and, when it exceeds 80 MB, clears the
+   HTTP cache on a background thread (cookies/localStorage untouched — session
+   is preserved). Checked on backgrounding and on every memory trim.
+
+Logcat markers:
+- `ArenaWebView: offline snapshot saved (WxH) for <url>`
+- `ArenaWebView: load failed (<url>) — showing offline shell`
+- `ArenaWebView: prefetch cached: <url>` / `prefetch skipped (metered|low-RAM)`
+- `ArenaWebView: cache NNMB > 80MB — clearing HTTP cache`
+
+Version 1.3.1 (versionCode 6).
+
 ## How to verify on a device
 
 ```bash

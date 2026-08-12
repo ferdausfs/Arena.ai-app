@@ -302,7 +302,7 @@ object FileTransferSupport {
     )
 
     /** True for arena.ai / lmarena.ai / lmsys.org / chatbot-arena.org (+ subdomains). */
-    private fun isArenaUrl(url: String?): Boolean {
+    fun isArenaUrl(url: String?): Boolean {
         val host = try {
             Uri.parse(url ?: "").host?.lowercase()
         } catch (_: Exception) {
