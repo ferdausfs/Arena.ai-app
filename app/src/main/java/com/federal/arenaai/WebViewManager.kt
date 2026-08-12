@@ -237,7 +237,7 @@ object WebViewManager {
         settings.allowFileAccess = false
         settings.allowFileAccessFromFileURLs = false
         settings.allowUniversalAccessFromFileURLs = false
-        settings.allowContentAccess = true
+        settings.setAllowContentAccess(true)
         settings.builtInZoomControls = true
         settings.displayZoomControls = false
         settings.mediaPlaybackRequiresUserGesture = true
@@ -357,15 +357,13 @@ object WebViewManager {
                         super.onReceivedTitle(view, title)
                     }
 
-                    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                        if (consoleMessage != null) {
-                            Log.d(
-                                TAG,
-                                "console.${consoleMessage.messageLevel()} " +
-                                    "${consoleMessage.sourceId()}:${consoleMessage.lineNumber()} " +
-                                    consoleMessage.message()
-                            )
-                        }
+                    override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                        Log.d(
+                            TAG,
+                            "console.${consoleMessage.messageLevel()} " +
+                                "${consoleMessage.sourceId()}:${consoleMessage.lineNumber()} " +
+                                consoleMessage.message()
+                        )
                         return super.onConsoleMessage(consoleMessage)
                     }
 
@@ -432,23 +430,22 @@ object WebViewManager {
                                 }
                             }
 
-                            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                                if (consoleMessage != null) {
-                                    Log.d(
-                                        TAG,
-                                        "popup.console.${consoleMessage.messageLevel()} " +
-                                            consoleMessage.message()
-                                    )
-                                }
+                            override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                                Log.d(
+                                    TAG,
+                                    "popup.console.${consoleMessage.messageLevel()} " +
+                                        consoleMessage.message()
+                                )
                                 return super.onConsoleMessage(consoleMessage)
                             }
 
                             override fun onShowFileChooser(
                                 webView: WebView?,
-                                callback: ValueCallback<Array<Uri>>,
-                                params: FileChooserParams
+                                callback: ValueCallback<Array<Uri>>?,
+                                params: FileChooserParams?
                             ): Boolean {
                                 Log.d(TAG, "popup onShowFileChooser")
+                                if (callback == null || params == null) return false
                                 return showFileChooser(webView, callback, params)
                             }
                         }
@@ -714,14 +711,16 @@ object WebViewManager {
             return null
         }
         val clip = data?.clipData
-        val fromClip = if (clip != null && clip.itemCount > 0) {
-            Array(clip.itemCount) { i -> clip.getItemAt(i).uri }
+        val fromClip: Array<Uri>? = if (clip != null && clip.itemCount > 0) {
+            (0 until clip.itemCount).mapNotNull { i -> clip.getItemAt(i).uri }.toTypedArray()
+                .takeIf { it.isNotEmpty() }
         } else {
             null
         }
+        val single: Uri? = data?.data
         return when {
             fromClip != null -> fromClip
-            data?.data != null -> arrayOf(data.data!!)
+            single != null -> arrayOf(single)
             cameraUri != null -> arrayOf(cameraUri)
             else -> null
         }
