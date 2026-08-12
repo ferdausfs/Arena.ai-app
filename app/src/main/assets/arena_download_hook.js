@@ -21,6 +21,22 @@
   window.__arenaNativeDlHook = true;
   window.__arenaBlobs = window.__arenaBlobs || {};
 
+  // Cap the blob registry so a long chat session that creates many Blobs
+  // (images, previews, exports) cannot grow it without bound and put memory
+  // pressure on the renderer. Downloads read by the bridge normally happen
+  // within moments of the blob being created, so evicting the oldest entries
+  // first is safe; anything older falls back to fetch(url) instead.
+  var MAX_REMEMBERED_BLOBS = 128;
+  function rememberBlob(url, blob) {
+    try {
+      window.__arenaBlobs[url] = blob;
+      var keys = Object.keys(window.__arenaBlobs);
+      while (keys.length > MAX_REMEMBERED_BLOBS) {
+        delete window.__arenaBlobs[keys.shift()];
+      }
+    } catch (_) {}
+  }
+
   function guessName(name, mime) {
     if (name && String(name).trim()) {
       return String(name).trim();
@@ -156,7 +172,7 @@
       var u = origCreate(obj);
       try {
         if (obj && typeof Blob !== "undefined" && obj instanceof Blob) {
-          window.__arenaBlobs[u] = obj;
+          rememberBlob(u, obj);
         }
       } catch (_) {}
       return u;

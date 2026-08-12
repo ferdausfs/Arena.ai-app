@@ -23,6 +23,7 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -47,6 +48,14 @@ object WebViewManager {
 
     /** WebView that currently owns [filePathCallback]; cancelled if that view dies. */
     private var fileChooserOwner: WebView? = null
+
+    /**
+     * Bumped every time the pending chooser is replaced or cancelled. The
+     * async URI-copy delivery in [deliverFileChooserResult] checks this before
+     * invoking the callback so a superseded chooser can never double-invoke a
+     * ValueCallback (the ValueCallback contract requires exactly-once).
+     */
+    private var fileChooserGeneration = 0L
 
     /**
      * Bridge to the Activity's registerForActivityResult launcher. The Activity
@@ -303,6 +312,22 @@ object WebViewManager {
                         FileTransferSupport.injectDownloadHook(view)
                     }
 
+                    override fun onReceivedHttpError(
+                        view: WebView?,
+                        request: WebResourceRequest?,
+                        errorResponse: WebResourceResponse?
+                    ) {
+                        super.onReceivedHttpError(view, request, errorResponse)
+                        if (request?.isForMainFrame != true) return
+                        // 4xx/5xx on the main frame is usually what the page maps
+                        // to "something went wrong" — log it for diagnosis.
+                        Log.w(
+                            TAG,
+                            "HTTP ${errorResponse?.statusCode} ${errorResponse?.reasonPhrase} " +
+                                "for ${request.url}"
+                        )
+                    }
+
                     override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                         super.onReceivedError(view, request, error)
                         if (request?.isForMainFrame != true) return
@@ -453,6 +478,20 @@ object WebViewManager {
                         popupWebView.webViewClient = object : WebViewClient() {
                             override fun shouldOverrideUrlLoading(v: WebView?, request: WebResourceRequest?): Boolean {
                                 return handleShouldOverride(v, request, activity)
+                            }
+
+                            override fun onReceivedHttpError(
+                                v: WebView?,
+                                request: WebResourceRequest?,
+                                errorResponse: WebResourceResponse?
+                            ) {
+                                super.onReceivedHttpError(v, request, errorResponse)
+                                if (request?.isForMainFrame != true) return
+                                Log.w(
+                                    TAG,
+                                    "popup HTTP ${errorResponse?.statusCode} ${errorResponse?.reasonPhrase} " +
+                                        "for ${request.url}"
+                                )
                             }
 
                             override fun onPageFinished(v: WebView?, url: String?) {
@@ -636,6 +675,7 @@ object WebViewManager {
         } catch (_: Exception) {}
         filePathCallback = null
         pendingCameraUri = null
+        fileChooserGeneration++
 
         val launcher = startFileChooser
         if (launcher == null) {
@@ -736,6 +776,7 @@ object WebViewManager {
      */
     fun deliverFileChooserResult(uris: Array<Uri>?) {
         val cb = filePathCallback
+        val generation = fileChooserGeneration
         filePathCallback = null
         fileChooserOwner = null
         if (cb == null) {
@@ -771,6 +812,13 @@ object WebViewManager {
                 } catch (_: Exception) {}
             }
             mainHandler.post {
+                // A newer chooser (or a cancel) superseded this one while we were
+                // copying — the old callback was already released with null, so
+                // delivering here would double-invoke it. Skip.
+                if (generation != fileChooserGeneration) {
+                    Log.w(TAG, "deliverFileChooserResult: chooser superseded, dropping ${copied.size} uri(s)")
+                    return@post
+                }
                 Log.d(TAG, "deliverFileChooserResult delivering ${copied.size} uri(s)")
                 try {
                     cb.onReceiveValue(copied)
@@ -791,6 +839,7 @@ object WebViewManager {
 
     /** Cancel any in-flight file chooser (e.g. on Activity destroy). */
     fun cancelPendingFileChooser() {
+        fileChooserGeneration++
         val cb = filePathCallback
         filePathCallback = null
         fileChooserOwner = null
@@ -872,13 +921,23 @@ object WebViewManager {
         webView?.goBack()
     }
 
+    /**
+     * Activity paused (screen off / app switched away). Deliberately do NOT
+     * pause the WebView: the app runs a foreground service whose entire purpose
+     * is keeping the arena.ai session (SSE streams, websockets, fetch) alive in
+     * the background. Calling WebView.onPause() here kills in-flight
+     * connections, so the first message sent after returning to the app fails
+     * with "something went wrong" and only a manual resend works. Cookies are
+     * flushed so the session persists if the process is killed.
+     */
     fun onPause() {
-        webView?.onPause()
         flushCookies()
     }
 
+    /** Activity resumed — nothing to undo since we never paused the WebView. */
     fun onResume() {
-        webView?.onResume()
+        // Intentionally empty (see onPause). Keeping the WebView un-paused is
+        // what keeps the session/streams alive across backgrounding.
     }
 
     /**

@@ -249,6 +249,9 @@ object FileTransferSupport {
 
     fun injectDownloadHook(webView: WebView?) {
         val view = webView ?: return
+        // Nothing loaded yet (or navigating to about:blank) — skip; the hook
+        // will be (re)injected from the next onPageFinished/onProgressChanged.
+        if (view.url == null) return
         val js = hookJavaScript(view.context) ?: return
         view.post {
             try {

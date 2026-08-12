@@ -73,6 +73,54 @@ That is root cause #1 in the original brief: `DownloadListener` (once present) f
 - `ValueCallback` is invoked exactly once (null on cancel / destroy / renderer crash).
 - OAuth path, UA cleaning, cookie sharing, `allowFileAccess=false`, `MIXED_CONTENT_NEVER_ALLOW`, hardened `intent://` are unchanged.
 
+## Follow-up: "message send fails once, resend works"
+
+Reported on a real device: sending a message shows "something went wrong"; the
+same message succeeds when sent again.
+
+Root cause (ranked):
+
+1. **`WebView.onPause()` on Activity pause (HIGH, primary suspect).** The app
+   called `WebViewManager.onPause() → webView.onPause()` whenever the Activity
+   paused — i.e. every time the screen locks or the user switches apps. That
+   kills the page's in-flight connections (SSE / websocket / fetch). After
+   returning, the page still believes a connection exists, so the **first**
+   message send fails once; the client reconnects and the retry works. This
+   also contradicted the app's design: the foreground service exists precisely
+   to keep the arena.ai session alive in the background.
+   **Fix:** `onPause()` no longer pauses the WebView — it only flushes cookies.
+   `onResume()` is a no-op.
+
+2. **File-chooser callback double-invocation (MEDIUM).** `deliverFileChooserResult`
+   copies picked URIs on a background executor before invoking the
+   `ValueCallback`. If a new chooser started (or the chooser was cancelled)
+   during that copy, the old callback had already been released with `null` —
+   the async delivery would then invoke it a *second* time. ValueCallbacks must
+   be invoked exactly once; a double call can trigger a JS error in the page.
+   **Fix:** a `fileChooserGeneration` counter is bumped whenever the pending
+   chooser is replaced/cancelled; the async delivery skips if the generation
+   moved on.
+
+3. **Unbounded blob registry in the download hook (MEDIUM, memory).**
+   `window.__arenaBlobs` remembered every Blob the page created
+   (`URL.createObjectURL`) with no eviction — a long chat with generated images
+   grows it without bound, pressuring the renderer.
+   **Fix:** cap at 128 entries with FIFO eviction; older blobs fall back to
+   `fetch(url)` if a download is requested for them.
+
+4. **No HTTP-error visibility (LOW, diagnostics).** `onReceivedHttpError` was
+   not overridden, so a main-frame 4xx/5xx (what the page surfaces as
+   "something went wrong") left no trace in logcat.
+   **Fix:** main and popup WebViewClients log main-frame HTTP status.
+
+5. **Hook evaluated before load (LOW).** `injectDownloadHook` now skips views
+   whose `url` is still null (about:blank / not loaded).
+
+Logcat markers after this fix:
+- `ArenaWebView: HTTP 4xx/5xx ...` when the site's API returns an error.
+- No `onPause`-related connection drops; first send after returning to the app
+  should succeed.
+
 ## How to verify on a device
 
 ```bash
