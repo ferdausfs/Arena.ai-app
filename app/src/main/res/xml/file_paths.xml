@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Copied picker files, re-exposed so WebView can read them. -->
+    <cache-path name="uploads" path="uploads/" />
+    <!-- Camera EXTRA_OUTPUT for image capture from the file chooser. -->
+    <cache-path name="camera" path="camera/" />
+    <!-- API 24–28 blob downloads (app-specific external dir). -->
+    <external-files-path name="ext_downloads" path="Download/" />
+    <files-path name="int_downloads" path="." />
+</paths>

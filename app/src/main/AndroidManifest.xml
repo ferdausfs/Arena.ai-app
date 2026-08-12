@@ -11,7 +11,12 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- Package visibility for external links and browser intents -->
+    <!-- Camera is offered as an extra in the file-chooser sheet for image uploads.
+         Not required: the system camera app holds the permission. Declared so
+         ACTION_IMAGE_CAPTURE is visible under package-visibility rules. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <!-- Package visibility for external links, the system file picker, and camera -->
     <queries>
         <intent>
             <action android:name="android.intent.action.VIEW" />
@@ -20,6 +25,21 @@
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="http" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.GET_CONTENT" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.PICK" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
         </intent>
     </queries>
 
@@ -64,6 +84,18 @@
             android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Keep web session alive" />
         </service>
+
+        <!-- Exposes cached uploads + camera captures to WebView via content://.
+             exported=false; grantUriPermissions lets the picker / WebView read. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

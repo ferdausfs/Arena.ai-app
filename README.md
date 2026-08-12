@@ -55,6 +55,8 @@ The previous versions had issues where logging in redirected users to a separate
 | **Minimizing** | Pressing the Back button navigates web history or minimizes the app instead of closing it. The session is only destroyed if the user explicitly taps "Close" on the notification. |
 | **Battery Exemption** | On first launch, the app prompts the user to disable battery optimization to prevent OEM battery savers from killing the background service. |
 | **External Links** | Internal `arena.ai` links and auth providers load in the app. Other non-auth external links (social media, docs) are offloaded to the user's default browser. |
+| **File upload** | `WebChromeClient.onShowFileChooser` on the main *and* popup WebViews opens the system picker (plus camera for image accepts). Selected files are copied into app cache and handed back as `FileProvider` `content://` Uris. |
+| **File download** | Real `http(s)` attachments go through `DownloadManager` (cookies + UA forwarded). SPA `blob:` / `data:` downloads (workspace zip, generated images) are intercepted in-page and saved via MediaStore (API 29+) to public Downloads. |
 
 ## 4. In-App Authentication & Login Handling
 

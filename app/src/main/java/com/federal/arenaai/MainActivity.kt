@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Log
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebView
@@ -48,6 +49,18 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
 
         // Register as WebViewManager listener for process-death recovery
         WebViewManager.listener = this
+
+        // Wire the system file-picker launcher for <input type="file"> uploads.
+        // Must be assigned BEFORE getWebView() so the first page can already pick files.
+        WebViewManager.startFileChooser = { intent ->
+            try {
+                Log.d(WebViewManager.TAG, "fileChooserLauncher.launch action=${intent.action} type=${intent.type}")
+                fileChooserLauncher.launch(intent)
+            } catch (e: Exception) {
+                Log.e(WebViewManager.TAG, "fileChooserLauncher.launch failed", e)
+                WebViewManager.cancelPendingFileChooser()
+            }
+        }
 
         // Attach WebView
         val webView = WebViewManager.getWebView(this)
@@ -161,6 +174,23 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
         checkBatteryOptimization()
     }
 
+    /**
+     * System file picker / camera for <input type="file"> uploads. Launched by
+     * WebViewManager.onShowFileChooser(); the result is delivered back via
+     * WebViewManager.deliverFileChooserResult(). A null result is REQUIRED to
+     * release the JS ValueCallback when the user cancels.
+     */
+    private val fileChooserLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        Log.d(
+            WebViewManager.TAG,
+            "fileChooser resultCode=${result.resultCode} data=${result.data}"
+        )
+        val uris = WebViewManager.consumePickerResult(result.resultCode, result.data)
+        WebViewManager.deliverFileChooserResult(uris)
+    }
+
     private fun checkBatteryOptimization() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val prefs = getPreferences(Context.MODE_PRIVATE)
@@ -201,6 +231,9 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
 
     override fun onDestroy() {
         super.onDestroy()
+        // Release any pending file-chooser callback so the next picker works.
+        WebViewManager.cancelPendingFileChooser()
+        WebViewManager.startFileChooser = null
         // Detach without (re)creating the singleton WebView (getWebView() has that side effect).
         WebViewManager.detachFrom(container)
         WebViewManager.flushCookies()
