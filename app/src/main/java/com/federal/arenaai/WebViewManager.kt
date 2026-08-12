@@ -68,6 +68,16 @@ object WebViewManager {
     private val ioExecutor = Executors.newSingleThreadExecutor()
 
     /**
+     * Renderer crash-loop guard. On low-RAM phones the renderer process can be
+     * OOM-killed repeatedly; auto-reloading the heavy page each time produces
+     * an endless "freeze → reload → freeze" loop that reads as "app not
+     * responding". After 2 crashes within 30 s we stop auto-reloading and show
+     * a lightweight page instead.
+     */
+    private var rendererCrashCount = 0
+    private var lastRendererCrashMs = 0L
+
+    /**
      * Background CPU governor.
      *
      * The WebView renderer keeps animating and running JS timers as long as it
@@ -91,6 +101,19 @@ object WebViewManager {
     private var webViewPaused = false
 
     private const val PAUSE_AFTER_BACKGROUND_MS = 45_000L
+
+    /** Shown instead of auto-reloading when the renderer crash-loops (OOM). */
+    private val LOW_MEMORY_PAGE_HTML = """
+        <html><body style="background:#1a1a2e;color:#fff;font-family:sans-serif;
+        display:flex;flex-direction:column;align-items:center;justify-content:center;
+        height:100vh;margin:0;padding:20px;box-sizing:border-box;text-align:center;">
+        <h2 style="margin:0 0 12px;">Device is running low on memory</h2>
+        <p style="margin:0 0 20px;color:#cbd5e1;max-width:420px;">The page was closed by
+        Android to free up memory. Close some other apps and try again.</p>
+        <a href="https://arena.ai" style="background:#4fc3f7;color:#0f172a;
+        padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600;">Retry</a>
+        </body></html>
+    """.trimIndent()
 
     /**
      * Listener for WebView lifecycle events that the Activity should handle.
@@ -267,6 +290,10 @@ object WebViewManager {
     private fun applyCommonSettings(settings: WebSettings) {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
+        // IndexedDB (used by SPA chat history like arena.ai's) requires the
+        // HTML5 database flag in WebView; without it the site may fall back to
+        // less efficient storage or re-fetch on every load.
+        settings.databaseEnabled = true
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         // Clean User-Agent so Google OAuth and other providers allow in-app login
         settings.userAgentString = cleanUserAgent(settings.userAgentString)
@@ -336,6 +363,8 @@ object WebViewManager {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
                         url?.let { currentUrl = it }
+                        // A page loaded cleanly — the renderer is healthy again.
+                        rendererCrashCount = 0
                         // Flush cookies after every page load to persist session
                         flushCookies()
                         FileTransferSupport.injectDownloadHook(view)
@@ -386,6 +415,20 @@ object WebViewManager {
 
                     override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                         cancelPendingFileChooser()
+
+                        val now = System.currentTimeMillis()
+                        rendererCrashCount = if (now - lastRendererCrashMs < 30_000L) {
+                            rendererCrashCount + 1
+                        } else {
+                            1
+                        }
+                        lastRendererCrashMs = now
+                        Log.w(
+                            TAG,
+                            "onRenderProcessGone (view=${view?.hashCode()}) crash#$rendererCrashCount " +
+                                "detail=${detail?.didCrash()}"
+                        )
+
                         try {
                             webView?.let {
                                 if (it.parent != null) {
@@ -400,7 +443,23 @@ object WebViewManager {
 
                         val ctx = view?.context ?: return false
                         val newWebView = getWebView(ctx)
-                        newWebView.loadUrl(currentUrl)
+
+                        if (rendererCrashCount >= 2) {
+                            // Crash loop (likely OOM on a low-RAM device):
+                            // auto-reloading the heavy page again would just
+                            // crash again — the "not responding" death spiral.
+                            // Show a lightweight page and let the user retry.
+                            Log.w(TAG, "renderer crash loop detected — showing low-memory page")
+                            newWebView.loadDataWithBaseURL(
+                                "https://arena.ai",
+                                LOW_MEMORY_PAGE_HTML,
+                                "text/html",
+                                "UTF-8",
+                                "https://arena.ai"
+                            )
+                        } else {
+                            newWebView.loadUrl(currentUrl)
+                        }
 
                         listener?.onWebViewRecreated(newWebView)
                         return true
