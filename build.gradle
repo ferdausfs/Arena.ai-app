@@ -13,8 +13,6 @@ allprojects {
     repositories {
         google()
         mavenCentral()
-        // GeckoView (Firefox engine) artifacts.
-        maven { url 'https://maven.mozilla.org/maven2/' }
     }
 }
 

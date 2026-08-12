@@ -193,6 +193,40 @@ Logcat markers:
 - `ArenaWebView: renderer crash loop detected — showing low-memory page`
 - `ArenaWebView: onTrimMemory level=.. — WebView trimmed`
 
+## GeckoView experiment — result: reverted (too heavy for low-RAM phones)
+
+A prototype embedding Mozilla's GeckoView (bundled Firefox engine) was built and
+merged, but on-device it made things WORSE: "not responding" and the phone
+freezing. That is expected — GeckoView is a full browser engine (~120 MB of
+native code) and on low-RAM phones it uses MORE memory than the system WebView
+(Chromium), not less. **Reverted from the default build (1.3.0).** The prototype
+code remains in git history (commits d8ed72d…d42327f) if ever revisited with a
+high-RAM device in mind.
+
+## RAM & storage tuning round (v1.3.0) — the answer to "use the phone's memory"
+
+Question: "can the app use the phone's storage instead of keeping the phone at
+full RAM?" — Yes, and most of that already happens; this round makes it
+explicit and adds emergency release:
+
+1. **WebView already caches to DISK, not RAM.** Chromium keeps its HTTP cache,
+   IndexedDB and localStorage on the phone's storage (app cache dir), and
+   `LOAD_DEFAULT` reuses them across sessions — returning to the app re-renders
+   from disk instead of re-downloading the whole SPA. Now explicit + documented.
+2. **`WebViewManager.onTrimMemory(level)`** (called from `Application.onTrimMemory`):
+   - forwards the trim to the WebView renderer (reflective) so it frees caches
+     BEFORE Android OOM-kills it (a killed renderer = full reload = the
+     "not responding" freeze);
+   - on SEVERE trims (RUNNING_CRITICAL and above) also clears the disk cache +
+     navigation history on a background thread — storage gets returned, memory
+     pressure doesn't build up, the phone stays responsive.
+3. **Background pause (45 s)** from the earlier performance round keeps the
+   renderer from burning CPU/GPU when hidden (already in v1.2.0).
+
+Logcat markers:
+- `ArenaWebView: onTrimMemory severe (level=..) — clearing disk cache + history`
+- `ArenaWebView: onTrimMemory level=.. — WebView trimmed`
+
 ## How to verify on a device
 
 ```bash
