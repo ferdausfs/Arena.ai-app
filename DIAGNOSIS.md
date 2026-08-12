@@ -147,7 +147,7 @@ nothing about RAM/CPU; the embedded Chrome is what counts. Changes:
 | # | What | Why |
 |---|------|-----|
 | 1 | **Delayed background pause (45 s)** — `onStop` schedules `WebView.onPause()+pauseTimers()`; `onStart` cancels/resumes. | Hidden app stopped burning CPU/GPU after a grace period → no more phone-wide slowdown. Quick switches & system pickers (<45 s) never pause, so streams/session stay live. |
-| 2 | **Renderer priority IMPORTANT (API 26+)** — `WebView.setRendererPriorityPolicy(IMPORTANT, false)`. | Under memory pressure the system was OOM-killing the renderer mid-workspace → reload/freeze cycles on low-RAM phones. The renderer now survives, so big sessions stay loaded. |
+| 2 | **Renderer priority** — checked: the platform default is already `RENDERER_PRIORITY_IMPORTANT` regardless of visibility (docs), so no explicit `setRendererPriorityPolicy` call is needed (it's an instance method, and changing the default is discouraged). | Under memory pressure the renderer is NOT aggressively OOM-killed by default, so big sessions stay loaded. |
 | 3 | **`flushCookies()` moved to the IO executor.** | It ran on the UI thread on every `onPageFinished` (disk I/O → jank). |
 | 4 | **Console message rate-limit** (main + popup WebChromeClients). | arena.ai's React SPA logs a lot; formatting strings on the UI thread for every message janked the app. Errors/warnings always logged; other levels capped at 30/page-load. |
 | 5 | **Staging-cache pruning** (uploads/camera/blob-in, ≥7 days old, ≤1/h). | Uploads & camera captures accumulated in cache forever → disk growth + slow phone. |

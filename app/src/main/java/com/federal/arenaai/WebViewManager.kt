@@ -619,19 +619,11 @@ object WebViewManager {
                     )
                 }
 
-                // Keep the renderer process important (API 26+). Under memory
-                // pressure the system otherwise OOM-kills the renderer while a
-                // big workspace/chat is open, forcing a full reload — the
-                // "app freezes / reloads mid-work" symptom on low-RAM phones.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    try {
-                        WebView.setRendererPriorityPolicy(
-                            WebView.RENDERER_PRIORITY_IMPORTANT,
-                            false
-                        )
-                    } catch (_: Exception) {}
-                }
-
+                // Renderer priority: the platform default is already
+                // RENDERER_PRIORITY_IMPORTANT regardless of visibility, so no
+                // explicit policy call is needed (setRendererPriorityPolicy is
+                // an instance method, and the docs recommend not changing the
+                // default unless handling renderer crashes).
                 loadUrl(currentUrl)
             }
         } else {
