@@ -96,5 +96,8 @@ dependencies {
 
     // Prototype: bundled Firefox engine (no system WebView/Chrome dependency).
     // Resolved from https://maven.mozilla.org/maven2/ (added in root build.gradle).
-    implementation 'org.mozilla.geckoview:geckoview:139.0.20250523173407'
+    // Pin 124: it depends on kotlin-stdlib 1.8.x (compatible with this project's
+    // Kotlin 1.9.22); newer GeckoView (139+) pulls kotlin-stdlib 2.1.x which the
+    // 1.9.22 compiler cannot read.
+    implementation 'org.mozilla.geckoview:geckoview:124.0.20240401114208'
 }

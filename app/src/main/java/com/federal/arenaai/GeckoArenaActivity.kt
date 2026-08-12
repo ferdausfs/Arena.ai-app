@@ -22,6 +22,7 @@ import org.mozilla.geckoview.GeckoRuntimeSettings
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoView
 import org.mozilla.geckoview.WebResponseInfo
+import java.io.File
 
 /**
  * PROTOTYPE — arena.ai on a BUNDLED Firefox engine (GeckoView).
@@ -83,18 +84,20 @@ class GeckoArenaActivity : AppCompatActivity() {
 
         val response: GeckoSession.PromptDelegate.PromptResponse = if (result.resultCode == RESULT_OK) {
             val clip = result.data?.clipData
-            val uris: Array<Uri> = when {
+            val rawUris: Array<Uri> = when {
                 clip != null && clip.itemCount > 0 ->
                     (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }.toTypedArray()
                 result.data?.data != null -> arrayOf(result.data!!.data!!)
                 else -> emptyArray()
             }
-            if (uris.isEmpty()) {
+            // GeckoView's FilePrompt only accepts file:// URIs — content:// URIs
+            // from the system picker must be copied into our cache first (same
+            // approach as GeckoView's own sample app).
+            val fileUris = rawUris.mapNotNull { toFileUri(it) }
+            if (fileUris.isEmpty()) {
                 prompt.dismiss()
             } else {
-                // confirm(Context, Uri[]) hands content:// Uris straight back to
-                // the page (Gecko reads them via its own content resolver).
-                prompt.confirm(applicationContext, uris)
+                prompt.confirm(applicationContext, fileUris.toTypedArray())
             }
         } else {
             prompt.dismiss()
@@ -296,6 +299,34 @@ class GeckoArenaActivity : AppCompatActivity() {
             return GeckoResult.fromValue(prompt.dismiss())
         }
         return result
+    }
+
+    /**
+     * Copy a content:// picker URI into our cache and return a file:// URI —
+     * required because GeckoView's FilePrompt accepts file:// URIs only.
+     */
+    private fun toFileUri(uri: Uri): Uri? {
+        if (uri.scheme?.equals("file", ignoreCase = true) == true) return uri
+        return try {
+            val display = FileTransferSupport.queryDisplayName(applicationContext, uri)
+                ?: "upload"
+            val safe = FileTransferSupport.sanitizeFileName(display)
+            val dir = File(cacheDir, "gecko-uploads").apply { mkdirs() }
+            val dest = File(dir, "${System.currentTimeMillis()}_$safe")
+            val copied = contentResolver.openInputStream(uri)?.use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+                true
+            } ?: false
+            if (!copied) {
+                Log.w(TAG, "toFileUri: could not copy $uri")
+                return null
+            }
+            Log.d(TAG, "toFileUri: $uri -> ${dest.absolutePath} (${dest.length()} bytes)")
+            Uri.fromFile(dest)
+        } catch (e: Exception) {
+            Log.e(TAG, "toFileUri failed for $uri", e)
+            null
+        }
     }
 
     /** http(s) downloads → system DownloadManager (with a notification). */
