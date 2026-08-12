@@ -121,6 +121,22 @@ Logcat markers after this fix:
 - No `onPause`-related connection drops; first send after returning to the app
   should succeed.
 
+## Follow-up round 2: deep review — 7 more bugs fixed
+
+| # | Severity | Bug | Fix |
+|---|----------|-----|-----|
+| 1 | **HIGH (functional)** | `shouldOverrideUrlLoading` intercepted **all** `blob:` navigations as downloads — including **subframe** loads (`<iframe src="blob:...">`, e.g. generated PDF/HTML previews). The preview was saved as a file AND failed to render. | Intercept only when `request.isForMainFrame == true`; subframe blob loads are left to the renderer. |
+| 2 | **MEDIUM (OAuth safety)** | After the document-start API was dropped, the download hook was evaluated via `evaluateJavascript` on **every** page — including OAuth hosts (accounts.google.com, github.com, clerk…). The hook patches `URL.createObjectURL`, `window.open` and `<a>.click` globally; the design intent (documented) was "never on OAuth hosts". | `injectDownloadHook` now checks the page host against arena.ai / lmarena.ai / lmsys.org / chatbot-arena.org (+ subdomains) and skips everything else. |
+| 3 | MEDIUM (perf) | `copyUriToAppCache` copied **our own FileProvider files** (camera capture, previously copied uploads) into cache again — duplicating e.g. a 10 MB photo on every upload. | Skip the copy when `uri.authority == providerAuthority(context)`. |
+| 4 | MEDIUM (perf/OOM) | `saveDataUrl` decoded multi-MB `data:` URLs **synchronously on the DownloadListener thread** (stalls the WebView), with no size pre-check (OOM risk). | Pre-check estimated decoded size vs `MAX_BLOB_BYTES` (reject + toast before decoding); decode + write moved to the IO executor. |
+| 5 | LOW (diagnostics) | On API 33+, if POST_NOTIFICATIONS is denied, download notifications vanish with no trace. | `notifySaved` logs when the permission is missing (file is still saved). |
+| 6 | LOW (security) | The error page interpolated `failedUrl` raw into an `href` attribute — a URL containing `"` could break out of the attribute. | HTML-escape `& " < >` before interpolation. |
+| 7 | LOW (leak) | Activity destroy did not dismiss an open OAuth popup dialog → the dialog kept an Activity reference. | `MainActivity.onDestroy` now calls `WebViewManager.dismissActivePopup()`. |
+
+Logcat markers after this round:
+- `ArenaWebView: shouldOverride blob (main frame): ...` — only for real downloads, never for iframe previews.
+- Download hook now only logs install attempts on arena hosts.
+
 ## How to verify on a device
 
 ```bash

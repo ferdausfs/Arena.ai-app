@@ -331,19 +331,27 @@ object WebViewManager {
                     override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                         super.onReceivedError(view, request, error)
                         if (request?.isForMainFrame != true) return
-                        val failedUrl = request.url?.toString() ?: currentUrl
-                        // Avoid recursing if we are already showing the error page.
-                        if (failedUrl.startsWith("about:")) return
+                val failedUrl = request.url?.toString() ?: currentUrl
+                // Avoid recursing if we are already showing the error page.
+                if (failedUrl.startsWith("about:")) return
 
-                        val html = """
-                            <html><body style="background:#1a1a2e;color:#fff;font-family:sans-serif;
-                            display:flex;flex-direction:column;align-items:center;justify-content:center;
-                            height:100vh;margin:0;padding:20px;box-sizing:border-box;">
-                            <h2>Connection Error</h2>
-                            <p>Unable to load the page. Please check your internet connection.</p>
-                            <p><a href="$failedUrl" style="color:#4fc3f7;">Retry</a></p>
-                            </body></html>
-                        """.trimIndent()
+                // Escape before interpolating into the href attribute — a URL
+                // containing quotes (e.g. a query param) must not break out.
+                val escapedUrl = failedUrl
+                    .replace("&", "&amp;")
+                    .replace("\"", "&quot;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+
+                val html = """
+                    <html><body style="background:#1a1a2e;color:#fff;font-family:sans-serif;
+                    display:flex;flex-direction:column;align-items:center;justify-content:center;
+                    height:100vh;margin:0;padding:20px;box-sizing:border-box;">
+                    <h2>Connection Error</h2>
+                    <p>Unable to load the page. Please check your internet connection.</p>
+                    <p><a href="$escapedUrl" style="color:#4fc3f7;">Retry</a></p>
+                    </body></html>
+                """.trimIndent()
                         view?.loadDataWithBaseURL("about:blank", html, "text/html", "UTF-8", failedUrl)
                     }
 
@@ -584,8 +592,13 @@ object WebViewManager {
         val ctx = view?.context ?: fallbackCtx
 
         // In-page blob navigation (some SPAs assign location.href = blobUrl).
+        // Only intercept MAIN-frame blob navigations. Subframe loads (e.g. a
+        // generated PDF/HTML preview shown in an <iframe src="blob:...">) must be
+        // left to the renderer — intercepting them would save the blob as a
+        // download and break the preview.
         if (scheme == "blob") {
-            Log.d(TAG, "shouldOverride blob: $uri")
+            if (request?.isForMainFrame != true) return false
+            Log.d(TAG, "shouldOverride blob (main frame): $uri")
             view?.let {
                 val name = URLUtil.guessFileName(uri.toString(), null, null)
                 FileTransferSupport.requestBlobFromPage(it, uri.toString(), name, null)

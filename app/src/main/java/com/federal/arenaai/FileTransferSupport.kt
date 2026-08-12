@@ -213,6 +213,13 @@ object FileTransferSupport {
     }
 
     fun copyUriToAppCache(context: Context, uri: Uri): Uri? {
+        // Already one of ours (camera capture EXTRA_OUTPUT, or a previously
+        // copied upload) — the file is in our cache and the WebView can read it
+        // via content://. Copying it again would duplicate e.g. a 10 MB photo.
+        if (uri.authority == providerAuthority(context)) {
+            Log.d(TAG, "copyUriToAppCache: uri already ours, skipping copy: $uri")
+            return uri
+        }
         return try {
             val display = queryDisplayName(context, uri) ?: "upload"
             val safe = sanitizeFileName(display)
@@ -247,11 +254,34 @@ object FileTransferSupport {
         }
     }
 
+    /** Arena / LMSYS hosts where the download hook is allowed to run. */
+    private val arenaHosts = setOf(
+        "arena.ai",
+        "lmarena.ai",
+        "lmsys.org",
+        "chatbot-arena.org"
+    )
+
+    /** True for arena.ai / lmarena.ai / lmsys.org / chatbot-arena.org (+ subdomains). */
+    private fun isArenaUrl(url: String?): Boolean {
+        val host = try {
+            Uri.parse(url ?: "").host?.lowercase()
+        } catch (_: Exception) {
+            null
+        } ?: return false
+        return arenaHosts.any { host == it || host.endsWith(".$it") }
+    }
+
     fun injectDownloadHook(webView: WebView?) {
         val view = webView ?: return
         // Nothing loaded yet (or navigating to about:blank) — skip; the hook
         // will be (re)injected from the next onPageFinished/onProgressChanged.
         if (view.url == null) return
+        // Only run on Arena origins — NEVER on OAuth/identity hosts
+        // (accounts.google.com, github.com, clerk, ...). The hook patches
+        // URL.createObjectURL / window.open / <a>.click; that must not happen
+        // on a login page.
+        if (!isArenaUrl(view.url)) return
         val js = hookJavaScript(view.context) ?: return
         view.post {
             try {
@@ -265,6 +295,11 @@ object FileTransferSupport {
     /**
      * Decode a `data:` URL in-process (no JS, no Binder). Used when
      * DownloadListener fires with a data: URL.
+     *
+     * The decode + write are moved to the IO executor: DownloadListener runs on
+     * the WebView's listener thread, and a multi-MB base64 payload would stall
+     * rendering if decoded there. A size pre-check rejects oversized payloads
+     * before any decoding to avoid OOM.
      */
     fun saveDataUrl(context: Context, url: String, fallbackName: String?): Boolean {
         if (!url.startsWith("data:", ignoreCase = true)) return false
@@ -275,13 +310,33 @@ object FileTransferSupport {
             val payload = url.substring(comma + 1)
             val mime = header.substringBefore(';', missingDelimiterValue = header)
                 .ifBlank { "application/octet-stream" }
-            val bytes = if (header.contains("base64", ignoreCase = true)) {
-                Base64.decode(payload, Base64.DEFAULT)
+            val base64 = header.contains("base64", ignoreCase = true)
+            val estimated = if (base64) {
+                payload.length.toLong() * 3L / 4L
             } else {
-                Uri.decode(payload).toByteArray(Charsets.UTF_8)
+                payload.length.toLong()
             }
-            if (bytes.isEmpty()) return false
-            io.execute { persistBytes(context, bytes, mime, fallbackName) }
+            if (estimated > MAX_BLOB_BYTES) {
+                Log.e(TAG, "saveDataUrl rejected: estimated $estimated bytes > $MAX_BLOB_BYTES")
+                toast(context, context.getString(R.string.download_too_large))
+                return true // handled (rejected)
+            }
+            io.execute {
+                try {
+                    val bytes = if (base64) {
+                        Base64.decode(payload, Base64.DEFAULT)
+                    } else {
+                        Uri.decode(payload).toByteArray(Charsets.UTF_8)
+                    }
+                    if (bytes.isEmpty()) {
+                        Log.e(TAG, "saveDataUrl: empty payload")
+                        return@execute
+                    }
+                    persistBytes(context, bytes, mime, fallbackName)
+                } catch (e: Exception) {
+                    Log.e(TAG, "saveDataUrl decode/save failed", e)
+                }
+            }
             true
         } catch (e: Exception) {
             Log.e(TAG, "saveDataUrl failed", e)
@@ -555,6 +610,15 @@ object FileTransferSupport {
 
     private fun notifySaved(context: Context, uri: Uri, fileName: String, mime: String) {
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                // The file IS saved; only the notification is skipped. Log so a
+                // missing notification is explainable (permission was denied).
+                Log.d(TAG, "notifySaved: POST_NOTIFICATIONS not granted — notification skipped for $fileName")
+                return
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 ensureDownloadChannel(context)
             }
