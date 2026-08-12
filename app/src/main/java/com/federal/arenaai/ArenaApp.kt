@@ -25,16 +25,26 @@ class ArenaApp : Application() {
      * A killed renderer forces a full page reload (the "freezes / not
      * responding" cycle on low-RAM phones) — this is the single most effective
      * way to prevent that from the native side.
+     *
+     * `WebView.onTrimMemory(int)` is not a public API in the compile SDK, so it
+     * is invoked reflectively; if the platform version lacks it the call is
+     * silently skipped (no harm).
      */
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
-                WebView.onTrimMemory(level)
+                val m = WebView::class.java.getMethod("onTrimMemory", Int::class.javaPrimitiveType)
+                m.invoke(null, level)
             } catch (_: Throwable) {}
         }
         if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
             Log.d(WebViewManager.TAG, "onTrimMemory level=$level — WebView trimmed")
         }
+    }
+
+    companion object {
+        lateinit var instance: ArenaApp
+            private set
     }
 }
