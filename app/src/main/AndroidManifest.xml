@@ -10,6 +10,15 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!--
+        API 24-28 only: writing JS/blob downloads to the PUBLIC Downloads folder on
+        legacy Android requires this. On API 29+ MediaStore.Downloads needs no storage
+        permission. No CAMERA permission: ACTION_IMAGE_CAPTURE is delegated to the
+        system camera app via an intent, which requires no app camera permission.
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <!-- Package visibility for external links and browser intents -->
     <queries>
@@ -64,6 +73,21 @@
             android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Keep web session alive" />
         </service>
+
+        <!--
+            FileProvider: (1) hands the system camera app a writable cache URI for
+            <input type="file" accept="image/*" capture> uploads, and (2) lets the
+            DownloadManager / notification open intents read app-private files.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

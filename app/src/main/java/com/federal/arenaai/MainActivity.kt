@@ -49,6 +49,9 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
         // Register as WebViewManager listener for process-death recovery
         WebViewManager.listener = this
 
+        // Wire the system file-picker launcher for <input type="file"> uploads
+        WebViewManager.startFileChooser = { intent -> fileChooserLauncher.launch(intent) }
+
         // Attach WebView
         val webView = WebViewManager.getWebView(this)
         if (webView.parent != null) {
@@ -151,14 +154,74 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
                 checkBatteryOptimization()
             }
         } else {
+            // API 24-28: WRITE_EXTERNAL_STORAGE is genuinely required to write
+            // JS/blob downloads directly into the PUBLIC Downloads folder. When it
+            // is denied, downloads still land in the app-specific Downloads dir.
+            requestLegacyStorageIfNeeded()
             checkBatteryOptimization()
         }
+    }
+
+    /**
+     * API 24-28 only: request WRITE_EXTERNAL_STORAGE so blob/data downloads can be
+     * written to the public Downloads directory (MediaStore.Downloads does not exist
+     * before API 29). Harmless if denied — saves then fall back to app storage.
+     */
+    private fun requestLegacyStorageIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
+        ) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                requestLegacyStorageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+        }
+    }
+
+    private val requestLegacyStorageLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _: Boolean ->
+        // Nothing to do — the save path checks the permission at write time.
     }
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _: Boolean ->
         checkBatteryOptimization()
+    }
+
+    /**
+     * System file picker for <input type="file"> uploads. Launched by
+     * WebViewManager.onShowFileChooser(); the result is delivered back via
+     * WebViewManager.deliverFileChooserResult(). Handles multi-select clipData,
+     * single data Uris, and camera-capture results (data == null but the
+     * EXTRA_OUTPUT FileProvider URI was written).
+     */
+    private val fileChooserLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val data = result.data
+        val clip = data?.clipData
+        val dataUri = data?.data
+        // Consume the camera EXTRA_OUTPUT URI if a camera action was offered.
+        val cameraUri = WebViewManager.consumePendingCameraUri()
+
+        val uris: Array<Uri>? = if (result.resultCode == RESULT_OK) {
+            when {
+                clip != null && clip.itemCount > 0 ->
+                    Array(clip.itemCount) { clip.getItemAt(it).uri }
+                dataUri != null -> arrayOf(dataUri)
+                // Camera capture returns RESULT_OK with data == null; the photo is
+                // at the FileProvider EXTRA_OUTPUT URI we passed to the camera.
+                cameraUri != null -> arrayOf(cameraUri)
+                else -> null
+            }
+        } else {
+            // null is REQUIRED to release the JS callback when the user cancels.
+            null
+        }
+        WebViewManager.deliverFileChooserResult(uris)
     }
 
     private fun checkBatteryOptimization() {
@@ -201,6 +264,9 @@ class MainActivity : AppCompatActivity(), WebViewManager.Listener {
 
     override fun onDestroy() {
         super.onDestroy()
+        // Release any pending file-chooser callback so the next picker works.
+        WebViewManager.cancelPendingFileChooser()
+        WebViewManager.startFileChooser = null
         // Detach without (re)creating the singleton WebView (getWebView() has that side effect).
         WebViewManager.detachFrom(container)
         WebViewManager.flushCookies()
