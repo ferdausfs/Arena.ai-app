@@ -1,5 +1,6 @@
 package com.federal.arenaai
 
+import android.annotation.SuppressLint
 import android.app.DownloadManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -24,6 +25,7 @@ import android.webkit.URLUtil
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.widget.Toast
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
 import androidx.webkit.WebViewCompat
@@ -481,6 +483,7 @@ object FileTransferSupport {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun writeViaMediaStore(
         context: Context,
         bytes: ByteArray,
@@ -563,7 +566,9 @@ object FileTransferSupport {
 
     private fun notifySaved(context: Context, uri: Uri, fileName: String, mime: String) {
         try {
-            ensureDownloadChannel(context)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ensureDownloadChannel(context)
+            }
             val viewIntent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, mime)
                 addFlags(
@@ -592,6 +597,7 @@ object FileTransferSupport {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun ensureDownloadChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
