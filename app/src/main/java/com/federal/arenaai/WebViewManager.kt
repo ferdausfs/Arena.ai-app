@@ -824,15 +824,18 @@ object WebViewManager {
 
         // Guard: onRenderProcessGone destroys the view, then dialog.dismiss()
         // fires onDismiss which destroys it again — double destroy() on a
-        // WebView can throw. Declared before the clients that reference it.
+        // WebView can throw. Declared before the clients that reference it;
+        // the view is a nullable var because the function is declared first.
         var popupDestroyed = false
+        var popupWebViewRef: WebView? = null
         fun destroyPopupView() {
             if (popupDestroyed) return
             popupDestroyed = true
-            try { popupWebView.destroy() } catch (_: Exception) {}
+            try { popupWebViewRef?.destroy() } catch (_: Exception) {}
         }
 
         val popupWebView = WebView(activity).apply {
+            popupWebViewRef = this
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
