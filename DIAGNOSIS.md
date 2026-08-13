@@ -353,6 +353,18 @@ Logcat markers:
 
 Version 1.3.4 (versionCode 9).
 
+## Bug-hunt round (v1.3.5) — 5 more real bugs found & fixed
+
+| # | Severity | Bug | Fix |
+|---|----------|-----|-----|
+| 1 | **HIGH (functional)** | The offline shell only worked within one process lifetime: the snapshot base64 lived in memory and was never read back from disk, so after a fresh launch (the most common offline case!) the user got the plain error page instead of their last chat. | `loadOfflineSnapshotFromDisk()` runs at WebView creation (IO thread) and fills the base64 from the saved JPEG; `onReceivedError` also does a fast synchronous read of small snapshots (≤2 MB) as a last resort. |
+| 2 | **HIGH (session loss)** | `flushCookies()` shared the single IO executor with blob saves, upload copies and screenshot encodes. A big blob save queued behind every page-load cookie flush → if the process died in between, cookies were lost ("I have to log in again"). | Dedicated `cookieExecutor` for flushes — always fast, never blocked. |
+| 3 | MEDIUM (perf/freeze) | The prefetch hidden WebView could start while the app was already backgrounded (8 s after page finish) — two heavy page loads in the background = exactly the CPU/RAM load that freezes low-end phones. | New `appVisible` flag (set in onBackgrounded/onForegrounded); prefetch skips when not visible. |
+| 4 | LOW (stability) | Double `WebView.destroy()` — prefetch (safety timeout + onPageFinished) and popup (onRenderProcessGone + onDismiss) could destroy the same view twice; destroy() after destroy can throw. | `destroyView()` / `destroyPopupView()` guards with a destroyed flag. |
+| 5 | LOW (leak) | `ArenaNativeBridge` kept `Assembly` objects (open FileOutputStream) forever if a blob download was interrupted and `saveBlobEnd` never arrived → file-handle leak. | `dropStaleAssemblies()` closes+deletes any assembly older than 5 minutes. |
+
+Version 1.3.5 (versionCode 10).
+
 ## How to verify on a device
 
 ```bash

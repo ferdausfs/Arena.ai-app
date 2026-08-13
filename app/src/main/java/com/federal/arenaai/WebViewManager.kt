@@ -78,6 +78,18 @@ object WebViewManager {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ioExecutor = Executors.newSingleThreadExecutor()
+    /**
+     * Dedicated executor for cookie flushes. flushCookies() runs on EVERY
+     * onPageFinished — sharing the single ioExecutor (blob saves, upload
+     * copies, screenshot encodes) would queue the flush behind potentially
+     * seconds of heavy I/O, and if the process dies in between the session
+     * cookies are lost ("I have to log in again"). This keeps the flush always
+     * fast.
+     */
+    private val cookieExecutor = Executors.newSingleThreadExecutor()
+
+    /** True while the Activity is visible (set from onForegrounded/onBackgrounded). */
+    private var appVisible = true
 
     /**
      * Renderer crash-loop guard. On low-RAM phones the renderer process can be
@@ -311,11 +323,13 @@ object WebViewManager {
 
     /**
      * Flush cookies to persistent storage so they survive app restarts and process kills.
-     * Runs on the IO executor: flush() can do disk I/O, and this is called from
-     * onPageFinished / onPause (UI thread) — blocking there janks rendering.
+     * Runs on its own dedicated executor: flush() can do disk I/O, and this is
+     * called from onPageFinished / onPause (UI thread) — but it must NEVER be
+     * queued behind blob saves/uploads on the shared ioExecutor, or a process
+     * kill in between would lose the session cookies.
      */
     fun flushCookies() {
-        ioExecutor.execute {
+        cookieExecutor.execute {
             try {
                 CookieManager.getInstance().flush()
             } catch (_: Exception) {
@@ -515,6 +529,10 @@ object WebViewManager {
     fun getWebView(context: Context): WebView {
         if (webView == null) {
             startWatchdog()
+            // Read the last offline snapshot from disk (fresh process launch) —
+            // fills the in-memory base64 so the offline shell works even when
+            // the app was restarted while offline.
+            loadOfflineSnapshotFromDisk(context)
             mutableContext = MutableContextWrapper(context)
             webView = WebView(mutableContext!!).apply {
                 layoutParams = ViewGroup.LayoutParams(
@@ -584,7 +602,22 @@ object WebViewManager {
                 // last view, show it (with a Retry bar) so the user still sees
                 // their last chat while offline. Fall back to the plain error.
                 val ctx = view?.context ?: mutableContext?.baseContext
-                val snapshotB64 = offlineShellBase64
+                var snapshotB64 = offlineShellBase64
+                // Fresh launch + immediate error: the async disk load may not
+                // have finished — do a fast synchronous read as a last resort
+                // (only for small snapshots, so this never janks the UI).
+                if (snapshotB64 == null && ctx != null) {
+                    try {
+                        val file = offlineImageFile(ctx)
+                        if (file.exists() && file.length() in 1..2_000_000) {
+                            val bytes = file.readBytes()
+                            snapshotB64 =
+                                "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+                            offlineShellBase64 = snapshotB64
+                            Log.d(TAG, "offline snapshot loaded synchronously (${bytes.size} bytes)")
+                        }
+                    } catch (_: Exception) {}
+                }
                 if (snapshotB64 != null) {
                     val prefs = ctx?.getSharedPreferences(OFFLINE_PREFS, Context.MODE_PRIVATE)
                     val title = prefs?.getString("title", null)
@@ -908,10 +941,20 @@ object WebViewManager {
 
                             override fun onRenderProcessGone(v: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                                 cancelFileChooserIfOwnedBy(popupWebView)
-                                try { popupWebView.destroy() } catch (_: Exception) {}
+                                destroyPopupView()
                                 try { dialog.dismiss() } catch (_: Exception) {}
                                 return true
                             }
+                        }
+
+                        // Guard: onRenderProcessGone destroys the view, then
+                        // dialog.dismiss() fires onDismiss which destroys it
+                        // again — double destroy() on a WebView can throw.
+                        var popupDestroyed = false
+                        fun destroyPopupView() {
+                            if (popupDestroyed) return
+                            popupDestroyed = true
+                            try { popupWebView.destroy() } catch (_: Exception) {}
                         }
 
                         dialog.setOnDismissListener {
@@ -920,9 +963,7 @@ object WebViewManager {
                                 activePopupDialog = null
                             }
                             cancelFileChooserIfOwnedBy(popupWebView)
-                            try {
-                                popupWebView.destroy()
-                            } catch (_: Exception) {}
+                            destroyPopupView()
 
                             // Single authoritative navigation: load the popup's target (or reload
                             // the current page) into the main WebView so the session renders.
@@ -1325,6 +1366,7 @@ object WebViewManager {
      * the cache-size budget.
      */
     fun onBackgrounded() {
+        appVisible = false
         captureOfflineSnapshot()
         enforceCacheLimit()
         lifecycleHandler.removeCallbacks(pauseRunnable)
@@ -1333,6 +1375,7 @@ object WebViewManager {
 
     /** App visible again (onStart): cancel any pending pause, resume if paused. */
     fun onForegrounded() {
+        appVisible = true
         lifecycleHandler.removeCallbacks(pauseRunnable)
         if (webViewPaused) {
             webViewPaused = false
@@ -1407,6 +1450,32 @@ object WebViewManager {
             }
         } catch (e: Exception) {
             Log.e(TAG, "captureOfflineSnapshot draw failed", e)
+        }
+    }
+
+    /**
+     * Load the saved snapshot from disk into memory (base64). This is what
+     * makes the offline shell work across process restarts: capture writes the
+     * JPEG to disk, and a later fresh launch reads it back — the error path
+     * must not do file I/O on the main thread, so this runs on the IO executor
+     * and just fills the @Volatile field.
+     */
+    private fun loadOfflineSnapshotFromDisk(ctx: Context) {
+        ioExecutor.execute {
+            try {
+                val file = offlineImageFile(ctx)
+                if (!file.exists() || file.length() == 0L) return@execute
+                if (file.length() > 8L * 1024 * 1024) {
+                    Log.w(TAG, "offline snapshot too large (${file.length()}) — ignoring")
+                    return@execute
+                }
+                val bytes = file.readBytes()
+                offlineShellBase64 =
+                    "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+                Log.d(TAG, "offline snapshot loaded from disk (${bytes.size} bytes)")
+            } catch (e: Exception) {
+                Log.e(TAG, "loadOfflineSnapshotFromDisk failed", e)
+            }
         }
     }
 
@@ -1489,6 +1558,13 @@ object WebViewManager {
 
     /** Load the prefetch URLs sequentially in a hidden WebView, then destroy. */
     private fun runPrefetch(ctx: Context) {
+        // Never prefetch while the app is hidden — spawning a second WebView
+        // that loads two heavy pages in the background is exactly the CPU/RAM
+        // load that freezes low-end phones.
+        if (!appVisible) {
+            Log.d(TAG, "prefetch skipped (app not visible)")
+            return
+        }
         Log.d(TAG, "prefetch starting: $prefetchUrls")
         val prefetchView = try {
             WebView(ctx.applicationContext)
@@ -1501,6 +1577,12 @@ object WebViewManager {
             domStorageEnabled = true
             cacheMode = WebSettings.LOAD_DEFAULT
         }
+        var destroyed = false
+        fun destroyView() {
+            if (destroyed) return
+            destroyed = true
+            try { prefetchView.destroy() } catch (_: Exception) {}
+        }
         var index = 0
         prefetchView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -1509,7 +1591,7 @@ object WebViewManager {
                 // off-site, an external link) aborts the prefetch chain.
                 if (u != null && FileTransferSupport.isArenaUrl(u)) return false
                 Log.w(TAG, "prefetch blocked external: $u")
-                try { view?.destroy() } catch (_: Exception) {}
+                destroyView()
                 return true
             }
 
@@ -1519,19 +1601,17 @@ object WebViewManager {
                 if (index < prefetchUrls.size) {
                     view?.loadUrl(prefetchUrls[index])
                 } else {
-                    try { view?.destroy() } catch (_: Exception) {}
+                    destroyView()
                 }
             }
         }
         // Safety timeout: never let the hidden WebView live forever.
-        lifecycleHandler.postDelayed({
-            try { prefetchView.destroy() } catch (_: Exception) {}
-        }, 60_000L)
+        lifecycleHandler.postDelayed({ destroyView() }, 60_000L)
         try {
             prefetchView.loadUrl(prefetchUrls[0])
         } catch (e: Exception) {
             Log.e(TAG, "prefetch load failed", e)
-            try { prefetchView.destroy() } catch (_: Exception) {}
+            destroyView()
         }
     }
 
