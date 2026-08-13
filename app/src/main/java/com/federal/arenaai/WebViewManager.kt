@@ -360,6 +360,10 @@ object WebViewManager {
             }
             level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
                 Log.d(TAG, "onTrimMemory level=$level — WebView trimmed")
+                // Free the in-memory offline snapshot JPEG (it can be
+                // re-captured on the next backgrounding) — every KB counts
+                // under memory pressure.
+                offlineShellBase64 = null
                 // Storage budget: keep the disk cache bounded.
                 enforceCacheLimit()
             }
@@ -463,6 +467,50 @@ object WebViewManager {
         Log.d(TAG, "attachFileTransfer on ${target.hashCode()} startFileChooser=${startFileChooser != null}")
     }
 
+    /**
+     * Renderer priority strategy (API 26+).
+     *
+     * Default is RENDERER_PRIORITY_IMPORTANT: the renderer is protected from
+     * being OOM-killed, so under memory pressure the SYSTEM sacrifices other
+     * apps — and once there is nothing left to kill, the whole phone freezes
+     * ("the phone directly shuts down" instead of an ANR dialog). That is the
+     * worst outcome.
+     *
+     * On low-RAM devices (< 512 MB heap) we deliberately set the renderer to
+     * RENDERER_PRIORITY_WAIVED (waived while not visible too): under pressure
+     * the RENDERER dies first — we handle it in onRenderProcessGone (with the
+     * crash-loop guard) and the page reloads from the disk cache. The phone
+     * stays responsive; the worst case is a page reload, never a frozen phone.
+     * Devices with >= 512 MB heap keep the platform default.
+     */
+    private fun applyRendererPolicy(wv: WebView) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val ctx = mutableContext?.baseContext ?: return
+        val memoryClass = memoryClassOf(ctx)
+        try {
+            if (memoryClass < 512) {
+                wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+                Log.w(
+                    TAG,
+                    "low-RAM device (heap $memoryClass MB): renderer WAIVED — " +
+                        "page may reload under memory pressure, phone stays responsive"
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "applyRendererPolicy failed", e)
+        }
+    }
+
+    /** The app's dalvik heap class in MB (a proxy for "how much RAM this phone has"). */
+    private fun memoryClassOf(ctx: Context): Int {
+        return try {
+            val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            am?.memoryClass ?: 256
+        } catch (_: Exception) {
+            256
+        }
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     fun getWebView(context: Context): WebView {
         if (webView == null) {
@@ -479,6 +527,7 @@ object WebViewManager {
                 // Configure cookies BEFORE loading any page
                 configureCookies(this)
                 attachFileTransfer(this)
+                applyRendererPolicy(this)
 
                 webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -697,6 +746,24 @@ object WebViewManager {
                 loadUrl(currentUrl)
             }
         } else {
+            // After the activity was finished/swiped from recents while the
+            // process survived (foreground service), the old WebView may be
+            // destroyed or bound to a dead activity. Using it would crash or
+            // show a blank screen ("clear recents makes it work again" —
+            // because that kills the process and we start fresh). Detect and
+            // recreate instead.
+            val existing = webView
+            // WebView has no isDestroyed getter; the reliable signal for a
+            // stale singleton is that its host Activity is dead (finished /
+            // swiped from recents while the process survived via the FGS).
+            val staleActivity = existing?.let { getActivityFromContext(it.context)?.isDestroyed } == true
+            if (existing == null || staleActivity) {
+                Log.w(TAG, "getWebView: stale WebView detected, recreating")
+                try { existing?.destroy() } catch (_: Exception) {}
+                webView = null
+                mutableContext = null
+                return getWebView(context)
+            }
             mutableContext?.baseContext = context
             webView?.let { configureCookies(it) }
         }
@@ -1300,6 +1367,14 @@ object WebViewManager {
         val ctx = mutableContext?.baseContext ?: return
         val url = view.url ?: return
         if (!FileTransferSupport.isArenaUrl(url)) return
+        // On very low-RAM phones the ~8-16 MB bitmap allocation + draw pass
+        // itself can push the device over the edge — skip the offline snapshot
+        // there entirely (the phone staying responsive matters more than an
+        // offline preview).
+        if (memoryClassOf(ctx) < 256) {
+            Log.d(TAG, "offline snapshot skipped (very low-RAM device)")
+            return
+        }
         val w = view.width
         val h = view.height
         if (w <= 0 || h <= 0) return
