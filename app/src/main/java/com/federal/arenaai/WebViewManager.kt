@@ -91,6 +91,22 @@ object WebViewManager {
     /** True while the Activity is visible (set from onForegrounded/onBackgrounded). */
     private var appVisible = true
 
+    // ---------------------------------------------------------------------
+    // Responsiveness throttles.
+    // flushCookies() fires on EVERY page load; dirSize() walks the whole
+    // WebView cache dir (potentially thousands of small files, seconds of
+    // I/O). Both are debounced so they can never queue up and make the app
+    // feel slow.
+    // ---------------------------------------------------------------------
+    @Volatile private var lastCookieFlushMs = 0L
+    @Volatile private var lastCacheCheckMs = 0L
+    /** After a severe memory trim, skip extra work for a while (system is stressed). */
+    @Volatile private var lastSevereTrimMs = 0L
+
+    private const val COOKIE_FLUSH_MIN_INTERVAL_MS = 3_000L
+    private const val CACHE_CHECK_MIN_INTERVAL_MS = 10 * 60 * 1000L
+    private const val SEVERE_TRIM_GRACE_MS = 60_000L
+
     /**
      * Renderer crash-loop guard. On low-RAM phones the renderer process can be
      * OOM-killed repeatedly; auto-reloading the heavy page each time produces
@@ -174,7 +190,14 @@ object WebViewManager {
     private val watchdogBeat = object : Runnable {
         override fun run() {
             lastMainThreadBeatMs = SystemClock.uptimeMillis()
-            watchdogHeartbeatHandler.postDelayed(this, 1000L)
+            // Only keep beating while the app is visible. In the background a
+            // 1 Hz main-thread message would keep the main looper from ever
+            // truly idling (tiny but continuous CPU wakeups on a phone we are
+            // trying to keep responsive); the background 5 s CHECK still runs
+            // and just reads the stale timestamp.
+            if (appVisible) {
+                watchdogHeartbeatHandler.postDelayed(this, 1000L)
+            }
         }
     }
 
@@ -185,6 +208,10 @@ object WebViewManager {
         lastMainThreadBeatMs = SystemClock.uptimeMillis()
         watchdogHeartbeatHandler.post(watchdogBeat)
         Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay({
+            // The heartbeat pauses when the app is hidden (see watchdogBeat),
+            // so a stale timestamp is expected in the background — only report
+            // blockages while the app is actually visible.
+            if (!appVisible) return@scheduleWithFixedDelay
             val blockedMs = SystemClock.uptimeMillis() - lastMainThreadBeatMs
             if (blockedMs > 8000L) {
                 Log.w(TAG, "POSSIBLE ANR: main thread blocked ~${blockedMs / 1000}s — stack:")
@@ -329,6 +356,13 @@ object WebViewManager {
      * kill in between would lose the session cookies.
      */
     fun flushCookies() {
+        // Debounce: onPageFinished fires on every main-frame navigation and
+        // SPA reloads can trigger several in quick succession. A flush right
+        // after a flush is redundant disk I/O — the previous one already
+        // persisted the same cookie state. At most one flush per 3 s.
+        val now = SystemClock.uptimeMillis()
+        if (now - lastCookieFlushMs < COOKIE_FLUSH_MIN_INTERVAL_MS) return
+        lastCookieFlushMs = now
         cookieExecutor.execute {
             try {
                 CookieManager.getInstance().flush()
@@ -364,6 +398,7 @@ object WebViewManager {
             // including background TRIM_MEMORY_COMPLETE (80) — counts as severe.
             level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> {
                 Log.w(TAG, "onTrimMemory severe (level=$level) — clearing disk cache + history")
+                lastSevereTrimMs = SystemClock.uptimeMillis()
                 // WebView methods MUST run on the main thread (they are View
                 // methods); scheduling them from a background thread can crash
                 // with "Calling View methods from another thread".
@@ -1421,6 +1456,13 @@ object WebViewManager {
             Log.d(TAG, "offline snapshot skipped (very low-RAM device)")
             return
         }
+        // The system just told us memory is critically low — a ~10 MB bitmap
+        // allocation + draw pass right now would add pressure to a phone that
+        // is already struggling. Skip; the snapshot is re-captured later.
+        if (SystemClock.uptimeMillis() - lastSevereTrimMs < SEVERE_TRIM_GRACE_MS) {
+            Log.d(TAG, "offline snapshot skipped (recent memory pressure)")
+            return
+        }
         val w = view.width
         val h = view.height
         if (w <= 0 || h <= 0) return
@@ -1636,6 +1678,16 @@ object WebViewManager {
     /** Public: check the cache size now (called from trims and backgrounding). */
     fun enforceCacheLimit() {
         val ctx = mutableContext?.baseContext ?: return
+        // Debounced: dirSize() recursively walks the WHOLE WebView cache dir —
+        // thousands of small files can take seconds of I/O. It runs on the
+        // shared ioExecutor, so an unfettered walk would stall uploads/blob
+        // saves and make the app feel slow. Check at most once per 10 minutes,
+        // and skip entirely right after a severe memory trim (the trim already
+        // cleared the cache).
+        val now = SystemClock.uptimeMillis()
+        if (now - lastCacheCheckMs < CACHE_CHECK_MIN_INTERVAL_MS) return
+        if (now - lastSevereTrimMs < SEVERE_TRIM_GRACE_MS) return
+        lastCacheCheckMs = now
         ioExecutor.execute {
             try {
                 val size = dirSize(ctx.cacheDir)

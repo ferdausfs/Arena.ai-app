@@ -365,6 +365,35 @@ Version 1.3.4 (versionCode 9).
 
 Version 1.3.5 (versionCode 10).
 
+## Responsiveness audit round (v1.3.6) — "check for anything that makes the phone slow"
+
+Focused audit on anything that could make the phone slow / unresponsive.
+Five throttling/guarding fixes:
+
+1. **Cache-size walk debounced to once per 10 minutes.** `dirSize()` recursively
+   walks the WHOLE WebView cache dir (thousands of small files = seconds of
+   I/O) and runs on the shared ioExecutor — an unfettered walk on every
+   backgrounding + every memory trim would stall uploads/blob saves and make
+   the app feel slow. Now checked at most once/10 min, and skipped entirely for
+   60 s after a severe memory trim (the trim already cleared the cache).
+2. **Cookie flush debounced to once per 3 s.** `flushCookies()` fired on every
+   page load; a flush right after a flush is redundant disk I/O. Still always
+   persisted quickly (own executor), just not more often than needed.
+3. **Offline snapshot skipped for 60 s after a severe trim.** A ~10 MB bitmap
+   allocation + draw pass right after the system says memory is critical adds
+   pressure to an already-struggling phone.
+4. **Watchdog heartbeat pauses in background.** The 1 Hz main-thread heartbeat
+   kept the main looper from ever idling (continuous tiny CPU wakeups). Now the
+   heartbeat only beats while visible; the 5 s background CHECK still runs and
+   only reports when visible (no false ANR logs from the stale timestamp).
+5. `lastSevereTrimMs` recorded on severe trims and used by 1 + 3.
+
+Logcat markers:
+- `ArenaWebView: offline snapshot skipped (recent memory pressure)`
+- `ArenaWebView: POSSIBLE ANR ...` — only while visible, only when truly blocked
+
+Version 1.3.6 (versionCode 11).
+
 ## How to verify on a device
 
 ```bash
