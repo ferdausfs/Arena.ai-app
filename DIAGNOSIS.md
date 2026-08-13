@@ -319,6 +319,40 @@ Logcat markers:
 
 Version 1.3.3 (versionCode 8).
 
+## Lightening round (v1.3.4) — "the phone freezes directly (no ANR dialog)"
+
+User report: the app now works better, but instead of the ANR dialog the phone
+sometimes freezes COMPLETELY, and clearing recents makes it work again.
+
+Why the phone freezes completely: the WebView renderer runs at the default
+`RENDERER_PRIORITY_IMPORTANT` — under memory pressure the system protects the
+renderer and sacrifices other apps; once nothing is left to kill, the whole
+phone thrashes. Clearing recents works because it kills the process (fresh
+start). Fixes in this round:
+
+1. **Adaptive renderer priority (the main fix).** On devices with < 512 MB heap
+   the renderer is set to `RENDERER_PRIORITY_WAIVED` (waived while not visible
+   too). Under memory pressure the RENDERER is now killed FIRST — handled by
+   `onRenderProcessGone` (crash-loop guard included) and the page reloads from
+   the disk cache. **The phone stays responsive; the worst case is a page
+   reload, never a frozen phone.** Devices with >= 512 MB keep the default.
+2. **Stale-WebView recovery ("clear recents makes it work").** After the
+   activity is swiped from recents while the process survived (foreground
+   service), the singleton could hold a destroyed/dead-activity WebView →
+   blank screen or crash. `getWebView()` now detects this
+   (`isDestroyed` / dead host activity) and recreates automatically.
+3. **Skip offline snapshot on < 256 MB heap** — the ~8-16 MB bitmap allocation
+   + draw pass could itself push a very low-RAM phone over the edge.
+4. **Free the in-memory offline snapshot JPEG on every memory trim** (it is
+   re-captured on the next backgrounding) — every KB counts under pressure.
+
+Logcat markers:
+- `ArenaWebView: low-RAM device (heap NN MB): renderer WAIVED — page may reload under memory pressure, phone stays responsive`
+- `ArenaWebView: getWebView: stale WebView detected, recreating`
+- `ArenaWebView: offline snapshot skipped (very low-RAM device)`
+
+Version 1.3.4 (versionCode 9).
+
 ## How to verify on a device
 
 ```bash
