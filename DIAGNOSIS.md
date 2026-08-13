@@ -394,6 +394,31 @@ Logcat markers:
 
 Version 1.3.6 (versionCode 11).
 
+## Self-diagnostics popups (v1.3.7) — the "debugging tool" the user asked for
+
+Requested feature: when the phone is struggling, the APP itself pops up a
+dialog offering to clean the cache / reload — like a built-in debug tool.
+Implemented with three triggers (all debounced to once per 2 minutes, shown
+only while the app is visible, and never during OAuth popups):
+
+1. **Memory pressure** — `onTrimMemory(RUNNING_LOW+)` while visible:
+   "Phone is under memory pressure → Clean cache" (clears WebView HTTP cache +
+   history and deletes uploads/camera/blob-in staging files, with a toast).
+2. **Slow load** — page started but not finished within 20 s:
+   "Loading is slow → Clean & reload" (clean then `webView.reload()`).
+3. **Renderer closed by the system** — crash-loop guard's low-memory page now
+   also shows "Page was closed to free memory → Clean & reload".
+
+Every dialog includes the tip "you can also close unused apps from Recents"
+(the app cannot kill other apps' background processes on modern Android).
+
+Logcat markers:
+- `ArenaWebView: onTrimMemory level=.. — WebView trimmed` (then the dialog)
+- `ArenaWebView: Loading is slow` dialog path
+- `ArenaWebView: renderer crash loop detected — showing low-memory page` (+dialog)
+
+Version 1.3.7 (versionCode 12).
+
 ## How to verify on a device
 
 ```bash

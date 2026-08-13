@@ -3,6 +3,7 @@ package com.federal.arenaai
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.AlertDialog
 import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.content.ComponentCallbacks2
@@ -106,6 +107,107 @@ object WebViewManager {
     private const val COOKIE_FLUSH_MIN_INTERVAL_MS = 3_000L
     private const val CACHE_CHECK_MIN_INTERVAL_MS = 10 * 60 * 1000L
     private const val SEVERE_TRIM_GRACE_MS = 60_000L
+
+    // ---------------------------------------------------------------------
+    // Self-diagnostics dialogs ("debugging tool").
+    // When the phone struggles (memory pressure, slow load, renderer closed
+    // by the system) the app itself pops up a dialog offering to clean the
+    // cache / reload — so the user can react instead of watching the phone
+    // freeze. Debounced so it never nags.
+    // ---------------------------------------------------------------------
+    private const val MEMORY_DIALOG_MIN_INTERVAL_MS = 2 * 60 * 1000L
+    private const val SLOW_LOAD_TIMEOUT_MS = 20_000L
+    @Volatile private var lastMemoryDialogMs = 0L
+    private var slowLoadDialogShown = false
+
+    private val slowLoadCheck = Runnable {
+        slowLoadCheckPosted = false
+        val wv = webView ?: return@Runnable
+        if (!appVisible) return@Runnable
+        if (wv.progress >= 100) return@Runnable
+        if (slowLoadDialogShown) return@Runnable
+        slowLoadDialogShown = true
+        showDiagnosticDialog(
+            title = "Loading is slow",
+            message = "Arena.ai is taking longer than usual to load. " +
+                "Cleaning the cache can speed it up.",
+            positive = "Clean & reload",
+            positiveAction = {
+                cleanCacheAndStaging()
+                mainHandler.postDelayed({ webView?.reload() }, 500L)
+            }
+        )
+    }
+    private var slowLoadCheckPosted = false
+
+    /** Show a cache-clean / reload dialog from the app itself (debug tool). */
+    private fun showDiagnosticDialog(
+        title: String,
+        message: String,
+        positive: String,
+        positiveAction: () -> Unit
+    ) {
+        if (!appVisible) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastMemoryDialogMs < MEMORY_DIALOG_MIN_INTERVAL_MS) return
+        lastMemoryDialogMs = now
+        mainHandler.post {
+            val activity = getActivityFromContext(mutableContext) ?: return@post
+            if (activity.isFinishing || activity.isDestroyed) return@post
+            try {
+                AlertDialog.Builder(activity)
+                    .setTitle(title)
+                    .setMessage("$message\n\nTip: you can also close unused apps from Recents.")
+                    .setPositiveButton(positive) { _, _ -> positiveAction() }
+                    .setNegativeButton("Later", null)
+                    .setCancelable(true)
+                    .show()
+            } catch (_: Exception) {}
+        }
+    }
+
+    /** Clear the WebView HTTP cache + our staging dirs (uploads/camera/blobs). */
+    private fun cleanCacheAndStaging() {
+        mainHandler.post {
+            try { webView?.clearCache(false) } catch (_: Exception) {}
+            try { webView?.clearHistory() } catch (_: Exception) {}
+        }
+        ioExecutor.execute {
+            try {
+                val ctx = mutableContext?.baseContext
+                if (ctx != null) {
+                    for (dirName in listOf("uploads", "camera", "blob-in")) {
+                        val dir = File(ctx.cacheDir, dirName)
+                        dir.listFiles()?.forEach { f ->
+                            try { f.delete() } catch (_: Exception) {}
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+            mainHandler.post {
+                try {
+                    android.widget.Toast.makeText(
+                        (mutableContext?.baseContext ?: FileTransferSupport.appContext()),
+                        "Cache cleaned",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private fun scheduleSlowLoadCheck() {
+        if (slowLoadCheckPosted) return
+        slowLoadCheckPosted = true
+        slowLoadDialogShown = false
+        lifecycleHandler.removeCallbacks(slowLoadCheck)
+        lifecycleHandler.postDelayed(slowLoadCheck, SLOW_LOAD_TIMEOUT_MS)
+    }
+
+    private fun cancelSlowLoadCheck() {
+        lifecycleHandler.removeCallbacks(slowLoadCheck)
+        slowLoadCheckPosted = false
+    }
 
     /**
      * Renderer crash-loop guard. On low-RAM phones the renderer process can be
@@ -415,6 +517,15 @@ object WebViewManager {
                 offlineShellBase64 = null
                 // Storage budget: keep the disk cache bounded.
                 enforceCacheLimit()
+                // Debug tool: tell the user the phone is under pressure and
+                // offer a one-tap cache clean (debounced to once/2 min).
+                showDiagnosticDialog(
+                    title = "Phone is under memory pressure",
+                    message = "Your phone is running low on memory. Cleaning the " +
+                        "app's cache can help the page load and respond faster.",
+                    positive = "Clean cache",
+                    positiveAction = { cleanCacheAndStaging() }
+                )
             }
         }
     }
@@ -590,6 +701,9 @@ object WebViewManager {
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon)
                         url?.let { currentUrl = it }
+                        if (view === webView) {
+                            scheduleSlowLoadCheck()
+                        }
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -606,6 +720,7 @@ object WebViewManager {
                         // after every page load janks/ANRs low-end phones. It is
                         // captured only on backgrounding (see onBackgrounded).
                         if (view === webView) {
+                            cancelSlowLoadCheck()
                             maybePrefetch()
                         }
                     }
@@ -731,6 +846,21 @@ object WebViewManager {
                                 "text/html",
                                 "UTF-8",
                                 "https://arena.ai"
+                            )
+                            // Debug tool: offer a one-tap "clean cache & reload"
+                            // instead of leaving the user on the retry page.
+                            showDiagnosticDialog(
+                                title = "Page was closed to free memory",
+                                message = "Your phone was under memory pressure and " +
+                                    "the page was closed. Clean the cache and reload?",
+                                positive = "Clean & reload",
+                                positiveAction = {
+                                    cleanCacheAndStaging()
+                                    mainHandler.postDelayed(
+                                        { webView?.loadUrl(currentUrl) },
+                                        500L
+                                    )
+                                }
                             )
                         } else {
                             newWebView.loadUrl(currentUrl)
