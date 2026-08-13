@@ -11,8 +11,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.MutableContextWrapper
-import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
@@ -20,7 +18,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Message
 import android.os.SystemClock
-import android.util.Base64
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
@@ -35,10 +32,6 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import java.io.File
-import java.io.FileOutputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -243,23 +236,6 @@ object WebViewManager {
     private var webViewPaused = false
 
     private const val PAUSE_AFTER_BACKGROUND_MS = 45_000L
-
-    // ---------------------------------------------------------------------
-    // Offline shell: last-viewed snapshot (stored on disk, shown on failure)
-    // ---------------------------------------------------------------------
-    private const val OFFLINE_DIR = "offline"
-    private const val OFFLINE_IMAGE = "offline_shell.jpg"
-    private const val OFFLINE_PREFS = "offline_shell"
-    /** Skip capturing very large viewports (keeps RAM spike + file size small). */
-    private const val OFFLINE_MAX_PIXELS = 4_000_000L
-
-    /**
-     * Precomputed base64 JPEG of the last successful arena view. Computed on a
-     * background thread at capture time so the offline-shell error path never
-     * does file I/O on the UI thread, and embedded as a data URI so the image
-     * renders on every device (content:// subresource loading is unreliable).
-     */
-    @Volatile private var offlineShellBase64: String? = null
 
     // ---------------------------------------------------------------------
     // Prefetch: warm the disk cache with likely-next pages (once per session)
@@ -511,10 +487,6 @@ object WebViewManager {
             }
             level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
                 Log.d(TAG, "onTrimMemory level=$level — WebView trimmed")
-                // Free the in-memory offline snapshot JPEG (it can be
-                // re-captured on the next backgrounding) — every KB counts
-                // under memory pressure.
-                offlineShellBase64 = null
                 // Storage budget: keep the disk cache bounded.
                 enforceCacheLimit()
                 // Debug tool: tell the user the phone is under pressure and
@@ -675,10 +647,6 @@ object WebViewManager {
     fun getWebView(context: Context): WebView {
         if (webView == null) {
             startWatchdog()
-            // Read the last offline snapshot from disk (fresh process launch) —
-            // fills the in-memory base64 so the offline shell works even when
-            // the app was restarted while offline.
-            loadOfflineSnapshotFromDisk(context)
             mutableContext = MutableContextWrapper(context)
             webView = WebView(mutableContext!!).apply {
                 layoutParams = ViewGroup.LayoutParams(
@@ -714,11 +682,7 @@ object WebViewManager {
                         // Flush cookies after every page load to persist session
                         flushCookies()
                         FileTransferSupport.injectDownloadHook(view)
-                        // Kick off the once-per-session prefetch. NOTE: the
-                        // offline snapshot is intentionally NOT captured here —
-                        // a full-screen bitmap + draw on the main thread right
-                        // after every page load janks/ANRs low-end phones. It is
-                        // captured only on backgrounding (see onBackgrounded).
+                        // Kick off the once-per-session prefetch.
                         if (view === webView) {
                             cancelSlowLoadCheck()
                             maybePrefetch()
@@ -744,62 +708,27 @@ object WebViewManager {
                     override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                         super.onReceivedError(view, request, error)
                         if (request?.isForMainFrame != true) return
-                val failedUrl = request.url?.toString() ?: currentUrl
-                // Avoid recursing if we are already showing the error page.
-                if (failedUrl.startsWith("about:")) return
+                        val failedUrl = request.url?.toString() ?: currentUrl
+                        // Avoid recursing if we are already showing the error page.
+                        if (failedUrl.startsWith("about:")) return
 
-                // Offline shell: if we have a precomputed base64 snapshot of the
-                // last view, show it (with a Retry bar) so the user still sees
-                // their last chat while offline. Fall back to the plain error.
-                val ctx = view?.context ?: mutableContext?.baseContext
-                var snapshotB64 = offlineShellBase64
-                // Fresh launch + immediate error: the async disk load may not
-                // have finished — do a fast synchronous read as a last resort
-                // (only for small snapshots, so this never janks the UI).
-                if (snapshotB64 == null && ctx != null) {
-                    try {
-                        val file = offlineImageFile(ctx)
-                        if (file.exists() && file.length() in 1..2_000_000) {
-                            val bytes = file.readBytes()
-                            snapshotB64 =
-                                "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
-                            offlineShellBase64 = snapshotB64
-                            Log.d(TAG, "offline snapshot loaded synchronously (${bytes.size} bytes)")
-                        }
-                    } catch (_: Exception) {}
-                }
-                if (snapshotB64 != null) {
-                    val prefs = ctx?.getSharedPreferences(OFFLINE_PREFS, Context.MODE_PRIVATE)
-                    val title = prefs?.getString("title", null)
-                    val time = prefs?.getLong("time", 0L) ?: 0L
-                    Log.w(TAG, "load failed ($failedUrl) — showing offline shell")
-                    view?.loadDataWithBaseURL(
-                        "https://arena.ai",
-                        offlineShellHtml(snapshotB64, failedUrl, title, time),
-                        "text/html",
-                        "UTF-8",
-                        null
-                    )
-                    return
-                }
+                        // Escape before interpolating into the href attribute — a URL
+                        // containing quotes (e.g. a query param) must not break out.
+                        val escapedUrl = failedUrl
+                            .replace("&", "&amp;")
+                            .replace("\"", "&quot;")
+                            .replace("<", "&lt;")
+                            .replace(">", "&gt;")
 
-                // Escape before interpolating into the href attribute — a URL
-                // containing quotes (e.g. a query param) must not break out.
-                val escapedUrl = failedUrl
-                    .replace("&", "&amp;")
-                    .replace("\"", "&quot;")
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;")
-
-                val html = """
-                    <html><body style="background:#1a1a2e;color:#fff;font-family:sans-serif;
-                    display:flex;flex-direction:column;align-items:center;justify-content:center;
-                    height:100vh;margin:0;padding:20px;box-sizing:border-box;">
-                    <h2>Connection Error</h2>
-                    <p>Unable to load the page. Please check your internet connection.</p>
-                    <p><a href="$escapedUrl" style="color:#4fc3f7;">Retry</a></p>
-                    </body></html>
-                """.trimIndent()
+                        val html = """
+                            <html><body style="background:#1a1a2e;color:#fff;font-family:sans-serif;
+                            display:flex;flex-direction:column;align-items:center;justify-content:center;
+                            height:100vh;margin:0;padding:20px;box-sizing:border-box;">
+                            <h2>Connection Error</h2>
+                            <p>Unable to load the page. Please check your internet connection.</p>
+                            <p><a href="$escapedUrl" style="color:#4fc3f7;">Retry</a></p>
+                            </body></html>
+                        """.trimIndent()
                         view?.loadDataWithBaseURL("about:blank", html, "text/html", "UTF-8", failedUrl)
                     }
 
@@ -1529,13 +1458,11 @@ object WebViewManager {
 
     /**
      * App fully hidden (onStop): schedule the delayed background pause so the
-     * renderer stops burning CPU once the app has been away for a while. Also
-     * saves the offline snapshot of what the user was looking at, and checks
-     * the cache-size budget.
+     * renderer stops burning CPU once the app has been away for a while, and
+     * check the cache-size budget.
      */
     fun onBackgrounded() {
         appVisible = false
-        captureOfflineSnapshot()
         enforceCacheLimit()
         lifecycleHandler.removeCallbacks(pauseRunnable)
         lifecycleHandler.postDelayed(pauseRunnable, PAUSE_AFTER_BACKGROUND_MS)
@@ -1551,139 +1478,6 @@ object WebViewManager {
             try { webView?.onResume() } catch (_: Exception) {}
             Log.d(TAG, "WebView resumed (foreground)")
         }
-    }
-
-    // =====================================================================
-    // OFFLINE SHELL — the last successfully-loaded arena view is stored on
-    // disk (viewport screenshot + URL). When the main frame fails to load
-    // (no network, server down), that saved view is shown instead of a blank
-    // error, so the user can still SEE their last chat without a connection.
-    // =====================================================================
-
-    private fun offlineDir(context: Context): File =
-        File(context.cacheDir, OFFLINE_DIR).apply { mkdirs() }
-
-    private fun offlineImageFile(context: Context): File =
-        File(offlineDir(context), OFFLINE_IMAGE)
-
-    /**
-     * Capture the current viewport to a JPEG. Only the bitmap allocation +
-     * view.draw() run on the UI thread (they must); the JPEG compression, file
-     * write and base64 encoding run on a background thread so page interaction
-     * is never janked by a full-screen screenshot.
-     */
-    private fun captureOfflineSnapshot() {
-        val view = webView ?: return
-        if (webViewPaused) return
-        val ctx = mutableContext?.baseContext ?: return
-        val url = view.url ?: return
-        if (!FileTransferSupport.isArenaUrl(url)) return
-        // On very low-RAM phones the ~8-16 MB bitmap allocation + draw pass
-        // itself can push the device over the edge — skip the offline snapshot
-        // there entirely (the phone staying responsive matters more than an
-        // offline preview).
-        if (memoryClassOf(ctx) < 256) {
-            Log.d(TAG, "offline snapshot skipped (very low-RAM device)")
-            return
-        }
-        // The system just told us memory is critically low — a ~10 MB bitmap
-        // allocation + draw pass right now would add pressure to a phone that
-        // is already struggling. Skip; the snapshot is re-captured later.
-        if (SystemClock.uptimeMillis() - lastSevereTrimMs < SEVERE_TRIM_GRACE_MS) {
-            Log.d(TAG, "offline snapshot skipped (recent memory pressure)")
-            return
-        }
-        val w = view.width
-        val h = view.height
-        if (w <= 0 || h <= 0) return
-        if (w.toLong() * h.toLong() > OFFLINE_MAX_PIXELS) return
-        val title = view.title ?: ""
-        val timeMs = System.currentTimeMillis()
-        try {
-            val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(bitmap))
-            ioExecutor.execute {
-                try {
-                    val file = offlineImageFile(ctx)
-                    FileOutputStream(file).use { out ->
-                        bitmap.compress(Bitmap.CompressFormat.JPEG, 70, out)
-                    }
-                    val bytes = file.readBytes()
-                    offlineShellBase64 =
-                        "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
-                    ctx.getSharedPreferences(OFFLINE_PREFS, Context.MODE_PRIVATE).edit()
-                        .putString("url", url)
-                        .putString("title", title)
-                        .putLong("time", timeMs)
-                        .apply()
-                    Log.d(TAG, "offline snapshot saved (${w}x$h) for $url")
-                } catch (e: Exception) {
-                    Log.e(TAG, "captureOfflineSnapshot io failed", e)
-                } finally {
-                    try { bitmap.recycle() } catch (_: Exception) {}
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "captureOfflineSnapshot draw failed", e)
-        }
-    }
-
-    /**
-     * Load the saved snapshot from disk into memory (base64). This is what
-     * makes the offline shell work across process restarts: capture writes the
-     * JPEG to disk, and a later fresh launch reads it back — the error path
-     * must not do file I/O on the main thread, so this runs on the IO executor
-     * and just fills the @Volatile field.
-     */
-    private fun loadOfflineSnapshotFromDisk(ctx: Context) {
-        ioExecutor.execute {
-            try {
-                val file = offlineImageFile(ctx)
-                if (!file.exists() || file.length() == 0L) return@execute
-                if (file.length() > 8L * 1024 * 1024) {
-                    Log.w(TAG, "offline snapshot too large (${file.length()}) — ignoring")
-                    return@execute
-                }
-                val bytes = file.readBytes()
-                offlineShellBase64 =
-                    "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
-                Log.d(TAG, "offline snapshot loaded from disk (${bytes.size} bytes)")
-            } catch (e: Exception) {
-                Log.e(TAG, "loadOfflineSnapshotFromDisk failed", e)
-            }
-        }
-    }
-
-    /** HTML page: stored snapshot (base64 data URI) + "You're offline" + Retry. */
-    private fun offlineShellHtml(base64Image: String, failedUrl: String, title: String?, timeMs: Long): String {
-        fun esc(s: String): String = s
-            .replace("&", "&amp;")
-            .replace("\"", "&quot;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        val time = if (timeMs > 0) {
-            try {
-                SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date(timeMs))
-            } catch (_: Exception) {
-                ""
-            }
-        } else {
-            ""
-        }
-        val t = title?.takeIf { it.isNotBlank() } ?: "saved view"
-        return """
-            <html><body style="margin:0;background:#1a1a2e;color:#fff;font-family:sans-serif;">
-            <div style="padding:12px 16px;background:#0f172a;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-              <div style="flex:1;min-width:200px;">
-                <div style="font-weight:700;">You're offline</div>
-                <div style="color:#94a3b8;font-size:13px;">${esc(t)} · $time</div>
-              </div>
-              <a href="${esc(failedUrl)}" style="background:#4fc3f7;color:#0f172a;
-                 padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:600;">Retry</a>
-            </div>
-            <img src="$base64Image" style="width:100%;display:block;"/>
-            </body></html>
-        """.trimIndent()
     }
 
     // =====================================================================
@@ -1799,11 +1593,11 @@ object WebViewManager {
 
     /**
      * Staging dirs whose size must NOT count toward the WebView HTTP-cache
-     * budget — they hold picked uploads, camera captures, in-flight blob
-     * downloads and the offline snapshot, and are reclaimed by their own
-     * pruning (pruneStagingCache) / overwrite logic.
+     * budget — they hold picked uploads, camera captures and in-flight blob
+     * downloads, and are reclaimed by their own pruning (pruneStagingCache) /
+     * overwrite logic.
      */
-    private val cacheExcludeDirs = setOf("uploads", "camera", "blob-in", "offline")
+    private val cacheExcludeDirs = setOf("uploads", "camera", "blob-in")
 
     /** Public: check the cache size now (called from trims and backgrounding). */
     fun enforceCacheLimit() {

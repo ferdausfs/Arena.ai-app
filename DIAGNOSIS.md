@@ -419,6 +419,32 @@ Logcat markers:
 
 Version 1.3.7 (versionCode 12).
 
+## v2.0.0 — "complete enhanced version": offline shell REMOVED, load speed kept
+
+Per the user's request ("bad dao offline, app fast lode hok, bug na thakuk,
+complete enhance version banao"):
+
+- **The entire offline-shell feature is removed**: snapshot capture
+  (`captureOfflineSnapshot`), the in-memory/disk base64 pipeline
+  (`offlineShellBase64`, `loadOfflineSnapshotFromDisk`, `offlineShellHtml`),
+  its constants, the `offline/` cache dir, the FileProvider path and the
+  `onReceivedError` offline branch. `onReceivedError` is back to the simple
+  "Connection Error — Retry" page. This deletes the last remaining
+  full-screen bitmap allocation + draw on the main thread and a whole class of
+  bugs (restart-loading, sync-read fallback, base64 memory).
+- **Everything that makes it fast stays**: disk-first caching (`LOAD_DEFAULT`),
+  once-per-session prefetch of `/leaderboard` + `/agent` (guarded: metered,
+  < 512 MB heap, app-hidden), renderer WAIVED on low-RAM (phone never frozen),
+  ANR watchdog, throttled cookie flush + cache-size walk, background pause,
+  self-diagnostics popups (memory pressure / slow load / crash → Clean cache).
+- Cleaned imports + removed the now-dead staging dir from the cache-size
+  exclusion list.
+- **Version 2.0.0 (versionCode 13)** — the enhanced build.
+
+This is the intended final shape: fast loads from disk cache, no main-thread
+screenshot work, no offline preview complexity, and self-healing dialogs when
+the phone is under pressure.
+
 ## How to verify on a device
 
 ```bash
