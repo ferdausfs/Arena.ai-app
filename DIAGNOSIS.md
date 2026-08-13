@@ -278,6 +278,47 @@ Also: removed the now-unused `FileProvider` import/`offlineSnapshotUri` (base64 
 
 Version 1.3.2 (versionCode 7).
 
+## ANR-proofing round (v1.3.3) — "app not responding" must never appear
+
+Straight answer: the ANR dialog is shown by the SYSTEM when the app's main
+thread cannot process input for ~5 s. It can be triggered by things outside the
+app (the whole phone under memory pressure, GC storms, CPU throttling, other
+apps), so it can never be guaranteed-away 100% — but this round removes every
+known in-app cause and makes any remaining blockage visible:
+
+1. **Removed the biggest remaining main-thread cost**: the offline snapshot was
+   captured ~1.5 s after EVERY page load (full-screen `Bitmap.createBitmap` +
+   `view.draw()` on the UI thread = ~10 MB allocation + draw pass right when the
+   user starts interacting). It is now captured ONLY on backgrounding
+   (`onBackgrounded`), when the user is leaving anyway. The offline shell still
+   works (the last view is what the user sees on return).
+2. **ANR watchdog**: a 1 s heartbeat runs on the main thread; a background
+   check every 5 s compares it against the clock. If the main thread stops
+   beating for > 8 s, logcat records:
+   ```
+   ArenaWebView: POSSIBLE ANR: main thread blocked ~Ns — stack:
+       at android.os.MessageQueue.next(...)
+       at android.app.ActivityThread.main(...)
+       ...
+   ```
+   So every future "app not responding" is diagnosable to the exact line.
+3. **Prefetch hardened**: the hidden prefetch WebView (which loads arena.ai
+   pages and doubles the renderer footprint) now requires `memoryClass >= 512 MB`
+   (was 256) and still skips on metered connections. On low-RAM phones it never
+   runs, so it cannot add load-storm pressure.
+
+Audited main-thread work after this round: WebView callbacks (must be main),
+the 45 s background pause, the rare crash-loop page, and the backgrounding
+snapshot. Everything else (cookie flush, blob decode, cache measure, upload
+copy, screenshot compress/base64) is on background threads.
+
+Logcat markers:
+- `ArenaWebView: POSSIBLE ANR: main thread blocked ~Ns — stack:` (only when it
+  actually happens — this is the signal to send me)
+- `ArenaWebView: prefetch skipped (low-RAM device)` on phones with < 512 MB heap
+
+Version 1.3.3 (versionCode 8).
+
 ## How to verify on a device
 
 ```bash
