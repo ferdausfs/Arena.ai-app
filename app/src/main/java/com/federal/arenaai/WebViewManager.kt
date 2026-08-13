@@ -753,8 +753,11 @@ object WebViewManager {
             // because that kills the process and we start fresh). Detect and
             // recreate instead.
             val existing = webView
+            // WebView has no isDestroyed getter; the reliable signal for a
+            // stale singleton is that its host Activity is dead (finished /
+            // swiped from recents while the process survived via the FGS).
             val staleActivity = existing?.let { getActivityFromContext(it.context)?.isDestroyed } == true
-            if (existing == null || existing.isDestroyed || staleActivity) {
+            if (existing == null || staleActivity) {
                 Log.w(TAG, "getWebView: stale WebView detected, recreating")
                 try { existing?.destroy() } catch (_: Exception) {}
                 webView = null
