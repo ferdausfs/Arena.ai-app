@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import android.view.ViewGroup
@@ -38,6 +39,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 object WebViewManager {
     const val TAG = "ArenaWebView"
@@ -120,7 +122,6 @@ object WebViewManager {
     private const val OFFLINE_PREFS = "offline_shell"
     /** Skip capturing very large viewports (keeps RAM spike + file size small). */
     private const val OFFLINE_MAX_PIXELS = 4_000_000L
-    private var offlineCaptureScheduled = false
 
     /**
      * Precomputed base64 JPEG of the last successful arena view. Computed on a
@@ -143,6 +144,46 @@ object WebViewManager {
     // Cache size limit (bounded storage use)
     // ---------------------------------------------------------------------
     private const val CACHE_SIZE_LIMIT_BYTES = 80L * 1024 * 1024
+
+    // ---------------------------------------------------------------------
+    // ANR watchdog.
+    //
+    // Android shows "App not responding" when the MAIN thread cannot process
+    // input for ~5 s. That can be triggered by external factors (system under
+    // memory pressure, GC storms, other apps) that we cannot fully prevent —
+    // but when it happens we must be able to SEE where the main thread was
+    // stuck. A 1 s heartbeat runs on the main thread; a background check
+    // compares it against the clock and, if the main thread stopped updating
+    // it, logs the main thread's stack trace ("POSSIBLE ANR").
+    // ---------------------------------------------------------------------
+    private val watchdogHeartbeatHandler = Handler(Looper.getMainLooper())
+    @Volatile private var lastMainThreadBeatMs = 0L
+    private var watchdogStarted = false
+    private val watchdogBeat = object : Runnable {
+        override fun run() {
+            lastMainThreadBeatMs = SystemClock.uptimeMillis()
+            watchdogHeartbeatHandler.postDelayed(this, 1000L)
+        }
+    }
+
+    /** Start the 1 s heartbeat + 5 s background check (once). */
+    private fun startWatchdog() {
+        if (watchdogStarted) return
+        watchdogStarted = true
+        lastMainThreadBeatMs = SystemClock.uptimeMillis()
+        watchdogHeartbeatHandler.post(watchdogBeat)
+        Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay({
+            val blockedMs = SystemClock.uptimeMillis() - lastMainThreadBeatMs
+            if (blockedMs > 8000L) {
+                Log.w(TAG, "POSSIBLE ANR: main thread blocked ~${blockedMs / 1000}s — stack:")
+                try {
+                    Looper.getMainLooper().thread.stackTrace.take(20).forEach {
+                        Log.w(TAG, "    at $it")
+                    }
+                } catch (_: Exception) {}
+            }
+        }, 5, 5, TimeUnit.SECONDS)
+    }
 
     /** Shown instead of auto-reloading when the renderer crash-loops (OOM). */
     private val LOW_MEMORY_PAGE_HTML = """
@@ -425,6 +466,7 @@ object WebViewManager {
     @SuppressLint("SetJavaScriptEnabled")
     fun getWebView(context: Context): WebView {
         if (webView == null) {
+            startWatchdog()
             mutableContext = MutableContextWrapper(context)
             webView = WebView(mutableContext!!).apply {
                 layoutParams = ViewGroup.LayoutParams(
@@ -456,10 +498,12 @@ object WebViewManager {
                         // Flush cookies after every page load to persist session
                         flushCookies()
                         FileTransferSupport.injectDownloadHook(view)
-                        // Save the viewport to disk for the offline shell, and
-                        // kick off the once-per-session prefetch.
+                        // Kick off the once-per-session prefetch. NOTE: the
+                        // offline snapshot is intentionally NOT captured here —
+                        // a full-screen bitmap + draw on the main thread right
+                        // after every page load janks/ANRs low-end phones. It is
+                        // captured only on backgrounding (see onBackgrounded).
                         if (view === webView) {
-                            scheduleOfflineCapture()
                             maybePrefetch()
                         }
                     }
@@ -1244,16 +1288,6 @@ object WebViewManager {
     private fun offlineImageFile(context: Context): File =
         File(offlineDir(context), OFFLINE_IMAGE)
 
-    /** Debounced snapshot after a successful arena page load. */
-    private fun scheduleOfflineCapture() {
-        if (offlineCaptureScheduled) return
-        offlineCaptureScheduled = true
-        lifecycleHandler.postDelayed({
-            offlineCaptureScheduled = false
-            captureOfflineSnapshot()
-        }, 1500L)
-    }
-
     /**
      * Capture the current viewport to a JPEG. Only the bitmap allocation +
      * view.draw() run on the UI thread (they must); the JPEG compression, file
@@ -1368,7 +1402,11 @@ object WebViewManager {
     private fun hasEnoughMemory(ctx: Context): Boolean {
         return try {
             val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-            (am?.memoryClass ?: 0) >= 256 // MB
+            // A second, hidden WebView loading arena.ai pages doubles the
+            // renderer's memory footprint. Only prefetch on devices with
+            // enough heap (>= 512 MB); on low-RAM phones the extra load storm
+            // would cause exactly the ANR/freeze we are trying to prevent.
+            (am?.memoryClass ?: 0) >= 512 // MB
         } catch (_: Exception) {
             false
         }
