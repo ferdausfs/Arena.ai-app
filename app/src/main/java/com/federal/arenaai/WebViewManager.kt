@@ -822,6 +822,16 @@ object WebViewManager {
             return false
         }
 
+        // Guard: onRenderProcessGone destroys the view, then dialog.dismiss()
+        // fires onDismiss which destroys it again — double destroy() on a
+        // WebView can throw. Declared before the clients that reference it.
+        var popupDestroyed = false
+        fun destroyPopupView() {
+            if (popupDestroyed) return
+            popupDestroyed = true
+            try { popupWebView.destroy() } catch (_: Exception) {}
+        }
+
         val popupWebView = WebView(activity).apply {
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -945,16 +955,6 @@ object WebViewManager {
                                 try { dialog.dismiss() } catch (_: Exception) {}
                                 return true
                             }
-                        }
-
-                        // Guard: onRenderProcessGone destroys the view, then
-                        // dialog.dismiss() fires onDismiss which destroys it
-                        // again — double destroy() on a WebView can throw.
-                        var popupDestroyed = false
-                        fun destroyPopupView() {
-                            if (popupDestroyed) return
-                            popupDestroyed = true
-                            try { popupWebView.destroy() } catch (_: Exception) {}
                         }
 
                         dialog.setOnDismissListener {
