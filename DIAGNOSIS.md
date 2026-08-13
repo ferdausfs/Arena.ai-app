@@ -353,6 +353,72 @@ Logcat markers:
 
 Version 1.3.4 (versionCode 9).
 
+## Bug-hunt round (v1.3.5) — 5 more real bugs found & fixed
+
+| # | Severity | Bug | Fix |
+|---|----------|-----|-----|
+| 1 | **HIGH (functional)** | The offline shell only worked within one process lifetime: the snapshot base64 lived in memory and was never read back from disk, so after a fresh launch (the most common offline case!) the user got the plain error page instead of their last chat. | `loadOfflineSnapshotFromDisk()` runs at WebView creation (IO thread) and fills the base64 from the saved JPEG; `onReceivedError` also does a fast synchronous read of small snapshots (≤2 MB) as a last resort. |
+| 2 | **HIGH (session loss)** | `flushCookies()` shared the single IO executor with blob saves, upload copies and screenshot encodes. A big blob save queued behind every page-load cookie flush → if the process died in between, cookies were lost ("I have to log in again"). | Dedicated `cookieExecutor` for flushes — always fast, never blocked. |
+| 3 | MEDIUM (perf/freeze) | The prefetch hidden WebView could start while the app was already backgrounded (8 s after page finish) — two heavy page loads in the background = exactly the CPU/RAM load that freezes low-end phones. | New `appVisible` flag (set in onBackgrounded/onForegrounded); prefetch skips when not visible. |
+| 4 | LOW (stability) | Double `WebView.destroy()` — prefetch (safety timeout + onPageFinished) and popup (onRenderProcessGone + onDismiss) could destroy the same view twice; destroy() after destroy can throw. | `destroyView()` / `destroyPopupView()` guards with a destroyed flag. |
+| 5 | LOW (leak) | `ArenaNativeBridge` kept `Assembly` objects (open FileOutputStream) forever if a blob download was interrupted and `saveBlobEnd` never arrived → file-handle leak. | `dropStaleAssemblies()` closes+deletes any assembly older than 5 minutes. |
+
+Version 1.3.5 (versionCode 10).
+
+## Responsiveness audit round (v1.3.6) — "check for anything that makes the phone slow"
+
+Focused audit on anything that could make the phone slow / unresponsive.
+Five throttling/guarding fixes:
+
+1. **Cache-size walk debounced to once per 10 minutes.** `dirSize()` recursively
+   walks the WHOLE WebView cache dir (thousands of small files = seconds of
+   I/O) and runs on the shared ioExecutor — an unfettered walk on every
+   backgrounding + every memory trim would stall uploads/blob saves and make
+   the app feel slow. Now checked at most once/10 min, and skipped entirely for
+   60 s after a severe memory trim (the trim already cleared the cache).
+2. **Cookie flush debounced to once per 3 s.** `flushCookies()` fired on every
+   page load; a flush right after a flush is redundant disk I/O. Still always
+   persisted quickly (own executor), just not more often than needed.
+3. **Offline snapshot skipped for 60 s after a severe trim.** A ~10 MB bitmap
+   allocation + draw pass right after the system says memory is critical adds
+   pressure to an already-struggling phone.
+4. **Watchdog heartbeat pauses in background.** The 1 Hz main-thread heartbeat
+   kept the main looper from ever idling (continuous tiny CPU wakeups). Now the
+   heartbeat only beats while visible; the 5 s background CHECK still runs and
+   only reports when visible (no false ANR logs from the stale timestamp).
+5. `lastSevereTrimMs` recorded on severe trims and used by 1 + 3.
+
+Logcat markers:
+- `ArenaWebView: offline snapshot skipped (recent memory pressure)`
+- `ArenaWebView: POSSIBLE ANR ...` — only while visible, only when truly blocked
+
+Version 1.3.6 (versionCode 11).
+
+## Self-diagnostics popups (v1.3.7) — the "debugging tool" the user asked for
+
+Requested feature: when the phone is struggling, the APP itself pops up a
+dialog offering to clean the cache / reload — like a built-in debug tool.
+Implemented with three triggers (all debounced to once per 2 minutes, shown
+only while the app is visible, and never during OAuth popups):
+
+1. **Memory pressure** — `onTrimMemory(RUNNING_LOW+)` while visible:
+   "Phone is under memory pressure → Clean cache" (clears WebView HTTP cache +
+   history and deletes uploads/camera/blob-in staging files, with a toast).
+2. **Slow load** — page started but not finished within 20 s:
+   "Loading is slow → Clean & reload" (clean then `webView.reload()`).
+3. **Renderer closed by the system** — crash-loop guard's low-memory page now
+   also shows "Page was closed to free memory → Clean & reload".
+
+Every dialog includes the tip "you can also close unused apps from Recents"
+(the app cannot kill other apps' background processes on modern Android).
+
+Logcat markers:
+- `ArenaWebView: onTrimMemory level=.. — WebView trimmed` (then the dialog)
+- `ArenaWebView: Loading is slow` dialog path
+- `ArenaWebView: renderer crash loop detected — showing low-memory page` (+dialog)
+
+Version 1.3.7 (versionCode 12).
+
 ## How to verify on a device
 
 ```bash

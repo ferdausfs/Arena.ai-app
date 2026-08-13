@@ -3,6 +3,7 @@ package com.federal.arenaai
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.AlertDialog
 import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.content.ComponentCallbacks2
@@ -78,6 +79,135 @@ object WebViewManager {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ioExecutor = Executors.newSingleThreadExecutor()
+    /**
+     * Dedicated executor for cookie flushes. flushCookies() runs on EVERY
+     * onPageFinished — sharing the single ioExecutor (blob saves, upload
+     * copies, screenshot encodes) would queue the flush behind potentially
+     * seconds of heavy I/O, and if the process dies in between the session
+     * cookies are lost ("I have to log in again"). This keeps the flush always
+     * fast.
+     */
+    private val cookieExecutor = Executors.newSingleThreadExecutor()
+
+    /** True while the Activity is visible (set from onForegrounded/onBackgrounded). */
+    private var appVisible = true
+
+    // ---------------------------------------------------------------------
+    // Responsiveness throttles.
+    // flushCookies() fires on EVERY page load; dirSize() walks the whole
+    // WebView cache dir (potentially thousands of small files, seconds of
+    // I/O). Both are debounced so they can never queue up and make the app
+    // feel slow.
+    // ---------------------------------------------------------------------
+    @Volatile private var lastCookieFlushMs = 0L
+    @Volatile private var lastCacheCheckMs = 0L
+    /** After a severe memory trim, skip extra work for a while (system is stressed). */
+    @Volatile private var lastSevereTrimMs = 0L
+
+    private const val COOKIE_FLUSH_MIN_INTERVAL_MS = 3_000L
+    private const val CACHE_CHECK_MIN_INTERVAL_MS = 10 * 60 * 1000L
+    private const val SEVERE_TRIM_GRACE_MS = 60_000L
+
+    // ---------------------------------------------------------------------
+    // Self-diagnostics dialogs ("debugging tool").
+    // When the phone struggles (memory pressure, slow load, renderer closed
+    // by the system) the app itself pops up a dialog offering to clean the
+    // cache / reload — so the user can react instead of watching the phone
+    // freeze. Debounced so it never nags.
+    // ---------------------------------------------------------------------
+    private const val MEMORY_DIALOG_MIN_INTERVAL_MS = 2 * 60 * 1000L
+    private const val SLOW_LOAD_TIMEOUT_MS = 20_000L
+    @Volatile private var lastMemoryDialogMs = 0L
+    private var slowLoadDialogShown = false
+
+    private val slowLoadCheck = Runnable {
+        slowLoadCheckPosted = false
+        val wv = webView ?: return@Runnable
+        if (!appVisible) return@Runnable
+        if (wv.progress >= 100) return@Runnable
+        if (slowLoadDialogShown) return@Runnable
+        slowLoadDialogShown = true
+        showDiagnosticDialog(
+            title = "Loading is slow",
+            message = "Arena.ai is taking longer than usual to load. " +
+                "Cleaning the cache can speed it up.",
+            positive = "Clean & reload",
+            positiveAction = {
+                cleanCacheAndStaging()
+                mainHandler.postDelayed({ webView?.reload() }, 500L)
+            }
+        )
+    }
+    private var slowLoadCheckPosted = false
+
+    /** Show a cache-clean / reload dialog from the app itself (debug tool). */
+    private fun showDiagnosticDialog(
+        title: String,
+        message: String,
+        positive: String,
+        positiveAction: () -> Unit
+    ) {
+        if (!appVisible) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastMemoryDialogMs < MEMORY_DIALOG_MIN_INTERVAL_MS) return
+        lastMemoryDialogMs = now
+        mainHandler.post {
+            val activity = getActivityFromContext(mutableContext) ?: return@post
+            if (activity.isFinishing || activity.isDestroyed) return@post
+            try {
+                AlertDialog.Builder(activity)
+                    .setTitle(title)
+                    .setMessage("$message\n\nTip: you can also close unused apps from Recents.")
+                    .setPositiveButton(positive) { _, _ -> positiveAction() }
+                    .setNegativeButton("Later", null)
+                    .setCancelable(true)
+                    .show()
+            } catch (_: Exception) {}
+        }
+    }
+
+    /** Clear the WebView HTTP cache + our staging dirs (uploads/camera/blobs). */
+    private fun cleanCacheAndStaging() {
+        mainHandler.post {
+            try { webView?.clearCache(false) } catch (_: Exception) {}
+            try { webView?.clearHistory() } catch (_: Exception) {}
+        }
+        ioExecutor.execute {
+            try {
+                val ctx = mutableContext?.baseContext
+                if (ctx != null) {
+                    for (dirName in listOf("uploads", "camera", "blob-in")) {
+                        val dir = File(ctx.cacheDir, dirName)
+                        dir.listFiles()?.forEach { f ->
+                            try { f.delete() } catch (_: Exception) {}
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+            mainHandler.post {
+                try {
+                    android.widget.Toast.makeText(
+                        (mutableContext?.baseContext ?: FileTransferSupport.appContext()),
+                        "Cache cleaned",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private fun scheduleSlowLoadCheck() {
+        if (slowLoadCheckPosted) return
+        slowLoadCheckPosted = true
+        slowLoadDialogShown = false
+        lifecycleHandler.removeCallbacks(slowLoadCheck)
+        lifecycleHandler.postDelayed(slowLoadCheck, SLOW_LOAD_TIMEOUT_MS)
+    }
+
+    private fun cancelSlowLoadCheck() {
+        lifecycleHandler.removeCallbacks(slowLoadCheck)
+        slowLoadCheckPosted = false
+    }
 
     /**
      * Renderer crash-loop guard. On low-RAM phones the renderer process can be
@@ -162,7 +292,14 @@ object WebViewManager {
     private val watchdogBeat = object : Runnable {
         override fun run() {
             lastMainThreadBeatMs = SystemClock.uptimeMillis()
-            watchdogHeartbeatHandler.postDelayed(this, 1000L)
+            // Only keep beating while the app is visible. In the background a
+            // 1 Hz main-thread message would keep the main looper from ever
+            // truly idling (tiny but continuous CPU wakeups on a phone we are
+            // trying to keep responsive); the background 5 s CHECK still runs
+            // and just reads the stale timestamp.
+            if (appVisible) {
+                watchdogHeartbeatHandler.postDelayed(this, 1000L)
+            }
         }
     }
 
@@ -173,6 +310,10 @@ object WebViewManager {
         lastMainThreadBeatMs = SystemClock.uptimeMillis()
         watchdogHeartbeatHandler.post(watchdogBeat)
         Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay({
+            // The heartbeat pauses when the app is hidden (see watchdogBeat),
+            // so a stale timestamp is expected in the background — only report
+            // blockages while the app is actually visible.
+            if (!appVisible) return@scheduleWithFixedDelay
             val blockedMs = SystemClock.uptimeMillis() - lastMainThreadBeatMs
             if (blockedMs > 8000L) {
                 Log.w(TAG, "POSSIBLE ANR: main thread blocked ~${blockedMs / 1000}s — stack:")
@@ -311,11 +452,20 @@ object WebViewManager {
 
     /**
      * Flush cookies to persistent storage so they survive app restarts and process kills.
-     * Runs on the IO executor: flush() can do disk I/O, and this is called from
-     * onPageFinished / onPause (UI thread) — blocking there janks rendering.
+     * Runs on its own dedicated executor: flush() can do disk I/O, and this is
+     * called from onPageFinished / onPause (UI thread) — but it must NEVER be
+     * queued behind blob saves/uploads on the shared ioExecutor, or a process
+     * kill in between would lose the session cookies.
      */
     fun flushCookies() {
-        ioExecutor.execute {
+        // Debounce: onPageFinished fires on every main-frame navigation and
+        // SPA reloads can trigger several in quick succession. A flush right
+        // after a flush is redundant disk I/O — the previous one already
+        // persisted the same cookie state. At most one flush per 3 s.
+        val now = SystemClock.uptimeMillis()
+        if (now - lastCookieFlushMs < COOKIE_FLUSH_MIN_INTERVAL_MS) return
+        lastCookieFlushMs = now
+        cookieExecutor.execute {
             try {
                 CookieManager.getInstance().flush()
             } catch (_: Exception) {
@@ -350,6 +500,7 @@ object WebViewManager {
             // including background TRIM_MEMORY_COMPLETE (80) — counts as severe.
             level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> {
                 Log.w(TAG, "onTrimMemory severe (level=$level) — clearing disk cache + history")
+                lastSevereTrimMs = SystemClock.uptimeMillis()
                 // WebView methods MUST run on the main thread (they are View
                 // methods); scheduling them from a background thread can crash
                 // with "Calling View methods from another thread".
@@ -366,6 +517,15 @@ object WebViewManager {
                 offlineShellBase64 = null
                 // Storage budget: keep the disk cache bounded.
                 enforceCacheLimit()
+                // Debug tool: tell the user the phone is under pressure and
+                // offer a one-tap cache clean (debounced to once/2 min).
+                showDiagnosticDialog(
+                    title = "Phone is under memory pressure",
+                    message = "Your phone is running low on memory. Cleaning the " +
+                        "app's cache can help the page load and respond faster.",
+                    positive = "Clean cache",
+                    positiveAction = { cleanCacheAndStaging() }
+                )
             }
         }
     }
@@ -515,6 +675,10 @@ object WebViewManager {
     fun getWebView(context: Context): WebView {
         if (webView == null) {
             startWatchdog()
+            // Read the last offline snapshot from disk (fresh process launch) —
+            // fills the in-memory base64 so the offline shell works even when
+            // the app was restarted while offline.
+            loadOfflineSnapshotFromDisk(context)
             mutableContext = MutableContextWrapper(context)
             webView = WebView(mutableContext!!).apply {
                 layoutParams = ViewGroup.LayoutParams(
@@ -537,6 +701,9 @@ object WebViewManager {
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon)
                         url?.let { currentUrl = it }
+                        if (view === webView) {
+                            scheduleSlowLoadCheck()
+                        }
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -553,6 +720,7 @@ object WebViewManager {
                         // after every page load janks/ANRs low-end phones. It is
                         // captured only on backgrounding (see onBackgrounded).
                         if (view === webView) {
+                            cancelSlowLoadCheck()
                             maybePrefetch()
                         }
                     }
@@ -584,7 +752,22 @@ object WebViewManager {
                 // last view, show it (with a Retry bar) so the user still sees
                 // their last chat while offline. Fall back to the plain error.
                 val ctx = view?.context ?: mutableContext?.baseContext
-                val snapshotB64 = offlineShellBase64
+                var snapshotB64 = offlineShellBase64
+                // Fresh launch + immediate error: the async disk load may not
+                // have finished — do a fast synchronous read as a last resort
+                // (only for small snapshots, so this never janks the UI).
+                if (snapshotB64 == null && ctx != null) {
+                    try {
+                        val file = offlineImageFile(ctx)
+                        if (file.exists() && file.length() in 1..2_000_000) {
+                            val bytes = file.readBytes()
+                            snapshotB64 =
+                                "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+                            offlineShellBase64 = snapshotB64
+                            Log.d(TAG, "offline snapshot loaded synchronously (${bytes.size} bytes)")
+                        }
+                    } catch (_: Exception) {}
+                }
                 if (snapshotB64 != null) {
                     val prefs = ctx?.getSharedPreferences(OFFLINE_PREFS, Context.MODE_PRIVATE)
                     val title = prefs?.getString("title", null)
@@ -663,6 +846,21 @@ object WebViewManager {
                                 "text/html",
                                 "UTF-8",
                                 "https://arena.ai"
+                            )
+                            // Debug tool: offer a one-tap "clean cache & reload"
+                            // instead of leaving the user on the retry page.
+                            showDiagnosticDialog(
+                                title = "Page was closed to free memory",
+                                message = "Your phone was under memory pressure and " +
+                                    "the page was closed. Clean the cache and reload?",
+                                positive = "Clean & reload",
+                                positiveAction = {
+                                    cleanCacheAndStaging()
+                                    mainHandler.postDelayed(
+                                        { webView?.loadUrl(currentUrl) },
+                                        500L
+                                    )
+                                }
                             )
                         } else {
                             newWebView.loadUrl(currentUrl)
@@ -789,7 +987,20 @@ object WebViewManager {
             return false
         }
 
+        // Guard: onRenderProcessGone destroys the view, then dialog.dismiss()
+        // fires onDismiss which destroys it again — double destroy() on a
+        // WebView can throw. Declared before the clients that reference it;
+        // the view is a nullable var because the function is declared first.
+        var popupDestroyed = false
+        var popupWebViewRef: WebView? = null
+        fun destroyPopupView() {
+            if (popupDestroyed) return
+            popupDestroyed = true
+            try { popupWebViewRef?.destroy() } catch (_: Exception) {}
+        }
+
         val popupWebView = WebView(activity).apply {
+            popupWebViewRef = this
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -908,7 +1119,7 @@ object WebViewManager {
 
                             override fun onRenderProcessGone(v: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                                 cancelFileChooserIfOwnedBy(popupWebView)
-                                try { popupWebView.destroy() } catch (_: Exception) {}
+                                destroyPopupView()
                                 try { dialog.dismiss() } catch (_: Exception) {}
                                 return true
                             }
@@ -920,9 +1131,7 @@ object WebViewManager {
                                 activePopupDialog = null
                             }
                             cancelFileChooserIfOwnedBy(popupWebView)
-                            try {
-                                popupWebView.destroy()
-                            } catch (_: Exception) {}
+                            destroyPopupView()
 
                             // Single authoritative navigation: load the popup's target (or reload
                             // the current page) into the main WebView so the session renders.
@@ -1325,6 +1534,7 @@ object WebViewManager {
      * the cache-size budget.
      */
     fun onBackgrounded() {
+        appVisible = false
         captureOfflineSnapshot()
         enforceCacheLimit()
         lifecycleHandler.removeCallbacks(pauseRunnable)
@@ -1333,6 +1543,7 @@ object WebViewManager {
 
     /** App visible again (onStart): cancel any pending pause, resume if paused. */
     fun onForegrounded() {
+        appVisible = true
         lifecycleHandler.removeCallbacks(pauseRunnable)
         if (webViewPaused) {
             webViewPaused = false
@@ -1375,6 +1586,13 @@ object WebViewManager {
             Log.d(TAG, "offline snapshot skipped (very low-RAM device)")
             return
         }
+        // The system just told us memory is critically low — a ~10 MB bitmap
+        // allocation + draw pass right now would add pressure to a phone that
+        // is already struggling. Skip; the snapshot is re-captured later.
+        if (SystemClock.uptimeMillis() - lastSevereTrimMs < SEVERE_TRIM_GRACE_MS) {
+            Log.d(TAG, "offline snapshot skipped (recent memory pressure)")
+            return
+        }
         val w = view.width
         val h = view.height
         if (w <= 0 || h <= 0) return
@@ -1407,6 +1625,32 @@ object WebViewManager {
             }
         } catch (e: Exception) {
             Log.e(TAG, "captureOfflineSnapshot draw failed", e)
+        }
+    }
+
+    /**
+     * Load the saved snapshot from disk into memory (base64). This is what
+     * makes the offline shell work across process restarts: capture writes the
+     * JPEG to disk, and a later fresh launch reads it back — the error path
+     * must not do file I/O on the main thread, so this runs on the IO executor
+     * and just fills the @Volatile field.
+     */
+    private fun loadOfflineSnapshotFromDisk(ctx: Context) {
+        ioExecutor.execute {
+            try {
+                val file = offlineImageFile(ctx)
+                if (!file.exists() || file.length() == 0L) return@execute
+                if (file.length() > 8L * 1024 * 1024) {
+                    Log.w(TAG, "offline snapshot too large (${file.length()}) — ignoring")
+                    return@execute
+                }
+                val bytes = file.readBytes()
+                offlineShellBase64 =
+                    "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+                Log.d(TAG, "offline snapshot loaded from disk (${bytes.size} bytes)")
+            } catch (e: Exception) {
+                Log.e(TAG, "loadOfflineSnapshotFromDisk failed", e)
+            }
         }
     }
 
@@ -1489,6 +1733,13 @@ object WebViewManager {
 
     /** Load the prefetch URLs sequentially in a hidden WebView, then destroy. */
     private fun runPrefetch(ctx: Context) {
+        // Never prefetch while the app is hidden — spawning a second WebView
+        // that loads two heavy pages in the background is exactly the CPU/RAM
+        // load that freezes low-end phones.
+        if (!appVisible) {
+            Log.d(TAG, "prefetch skipped (app not visible)")
+            return
+        }
         Log.d(TAG, "prefetch starting: $prefetchUrls")
         val prefetchView = try {
             WebView(ctx.applicationContext)
@@ -1501,6 +1752,12 @@ object WebViewManager {
             domStorageEnabled = true
             cacheMode = WebSettings.LOAD_DEFAULT
         }
+        var destroyed = false
+        fun destroyView() {
+            if (destroyed) return
+            destroyed = true
+            try { prefetchView.destroy() } catch (_: Exception) {}
+        }
         var index = 0
         prefetchView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -1509,7 +1766,7 @@ object WebViewManager {
                 // off-site, an external link) aborts the prefetch chain.
                 if (u != null && FileTransferSupport.isArenaUrl(u)) return false
                 Log.w(TAG, "prefetch blocked external: $u")
-                try { view?.destroy() } catch (_: Exception) {}
+                destroyView()
                 return true
             }
 
@@ -1519,19 +1776,17 @@ object WebViewManager {
                 if (index < prefetchUrls.size) {
                     view?.loadUrl(prefetchUrls[index])
                 } else {
-                    try { view?.destroy() } catch (_: Exception) {}
+                    destroyView()
                 }
             }
         }
         // Safety timeout: never let the hidden WebView live forever.
-        lifecycleHandler.postDelayed({
-            try { prefetchView.destroy() } catch (_: Exception) {}
-        }, 60_000L)
+        lifecycleHandler.postDelayed({ destroyView() }, 60_000L)
         try {
             prefetchView.loadUrl(prefetchUrls[0])
         } catch (e: Exception) {
             Log.e(TAG, "prefetch load failed", e)
-            try { prefetchView.destroy() } catch (_: Exception) {}
+            destroyView()
         }
     }
 
@@ -1553,6 +1808,16 @@ object WebViewManager {
     /** Public: check the cache size now (called from trims and backgrounding). */
     fun enforceCacheLimit() {
         val ctx = mutableContext?.baseContext ?: return
+        // Debounced: dirSize() recursively walks the WHOLE WebView cache dir —
+        // thousands of small files can take seconds of I/O. It runs on the
+        // shared ioExecutor, so an unfettered walk would stall uploads/blob
+        // saves and make the app feel slow. Check at most once per 10 minutes,
+        // and skip entirely right after a severe memory trim (the trim already
+        // cleared the cache).
+        val now = SystemClock.uptimeMillis()
+        if (now - lastCacheCheckMs < CACHE_CHECK_MIN_INTERVAL_MS) return
+        if (now - lastSevereTrimMs < SEVERE_TRIM_GRACE_MS) return
+        lastCacheCheckMs = now
         ioExecutor.execute {
             try {
                 val size = dirSize(ctx.cacheDir)

@@ -25,10 +25,22 @@ class ArenaNativeBridge {
         val out: FileOutputStream,
         val mime: String,
         val fileName: String,
+        val createdAt: Long,
         var written: Long = 0
     )
 
     private val assemblies = ConcurrentHashMap<String, Assembly>()
+
+    /** Drop any assembly whose chunks stopped arriving > 5 minutes ago. */
+    private fun dropStaleAssemblies() {
+        val cutoff = System.currentTimeMillis() - 5L * 60L * 1000L
+        for ((id, a) in assemblies) {
+            if (a.createdAt < cutoff) {
+                Log.w(FileTransferSupport.TAG, "saveBlobBegin: dropping stale assembly $id")
+                drop(id)
+            }
+        }
+    }
 
     @JavascriptInterface
     fun saveBlob(base64: String?, mimeType: String?, fileName: String?) {
@@ -52,6 +64,7 @@ class ArenaNativeBridge {
         if (id.isNullOrBlank()) return
         val ctx = FileTransferSupport.appContext() ?: return
         drop(id)
+        dropStaleAssemblies()
         try {
             val dir = File(ctx.cacheDir, "blob-in").apply { mkdirs() }
             val file = File(dir, "blob_${id.filter { it.isLetterOrDigit() || it == '_' }}.bin")
@@ -60,7 +73,8 @@ class ArenaNativeBridge {
                 file = file,
                 out = out,
                 mime = mimeType?.takeIf { it.isNotBlank() } ?: "application/octet-stream",
-                fileName = FileTransferSupport.sanitizeFileName(fileName)
+                fileName = FileTransferSupport.sanitizeFileName(fileName),
+                createdAt = System.currentTimeMillis()
             )
             Log.d(FileTransferSupport.TAG, "saveBlobBegin id=$id name=$fileName mime=$mimeType")
         } catch (e: Exception) {
